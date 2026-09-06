@@ -1,0 +1,13 @@
+# Normalize line endings to LF on all platforms
+* text=auto eol=lf
+
+# Windows batch files need CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.mkv binary
+*.mp4 binary
+*.ts binary
