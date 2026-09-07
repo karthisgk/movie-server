@@ -21,6 +21,13 @@ export interface Movie {
   /** The quality profile currently being transcoded, e.g. '480p', '720p', '1080p'. */
   transcodingProfile?: string;
 
+  /**
+   * Whether the original source file is still present on disk.
+   * false = source was removed/moved but HLS is still valid and being served.
+   * Defaults to true when undefined.
+   */
+  sourceAvailable?: boolean;
+
   durationSeconds?: number;
 
   width?: number;
@@ -35,12 +42,20 @@ export interface Movie {
   error?: string;
 }
 
-/** Stored inside the HLS output directory to detect stale transcodes */
+/** Stored inside the HLS output directory to detect stale transcodes and rebuild registry */
 export interface HlsMetadata {
   sourcePath: string;
   sourceSizeBytes: number;
   sourceModifiedTime: number;
   generatedAt: string;
+  // Rich fields written at transcode time — used to reconstruct registry when source is gone
+  title?: string;
+  filename?: string;
+  durationSeconds?: number;
+  width?: number;
+  height?: number;
+  videoCodec?: string;
+  audioCodec?: string;
 }
 
 export interface QualityProfile {

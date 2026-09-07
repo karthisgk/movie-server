@@ -4,7 +4,7 @@ import chokidar, { FSWatcher } from 'chokidar';
 import { isSupportedExtension } from './movieScanner.js';
 import { MovieRegistry } from './movieRegistry.js';
 import { getMediaInfo, selectQualityProfiles, transcodeToHls } from './ffmpegService.js';
-import { checkExistingHls, cleanupStaleHls, validateHlsOutput } from './hlsService.js';
+import { checkExistingHls, cleanupStaleHls, readHlsMetadata, validateHlsOutput } from './hlsService.js';
 import { TranscodingQueue } from './transcodingQueue.js';
 import { AppConfig } from '../config/env.js';
 import { QUALITY_PROFILES } from '../types/movie.js';
@@ -108,10 +108,19 @@ export class MovieWatcher {
     if (!isSupportedExtension(ext)) return;
 
     const movieId = generateMovieId(filename);
-    logger.info(`Movie removed: ${filename} (${movieId})`);
+    logger.info(`Movie source removed: ${filename} (${movieId})`);
 
-    this.registry.remove(movieId);
-    await cleanupStaleHls(movieId, this.config.hlsDirectory);
+    // Check whether a valid HLS output exists that we can continue to serve
+    const hlsValid = await validateHlsOutput(movieId, this.config.hlsDirectory);
+    if (hlsValid) {
+      // Keep the movie in the registry — HLS is still streamable without the source
+      this.registry.update(movieId, { sourceAvailable: false });
+      logger.info(`Source removed but valid HLS preserved — still serving: ${movieId}`);
+    } else {
+      // No HLS either — nothing left to serve
+      this.registry.remove(movieId);
+      logger.info(`Source removed and no valid HLS — unregistered: ${movieId}`);
+    }
   }
 
   private async onFileChanged(filePath: string): Promise<void> {
@@ -129,15 +138,34 @@ export class MovieWatcher {
       return;
     }
 
-    logger.info(`Movie source changed, will re-transcode: ${filename}`);
+    // Stat the changed file to get current size
+    let currentSize: number;
+    try {
+      const stats = await fs.stat(filePath);
+      currentSize = stats.size;
+    } catch {
+      // File already gone — nothing to do
+      return;
+    }
 
-    // Mark stale
-    this.registry.update(movieId, { status: 'discovered', error: undefined });
+    // Compare against the size recorded in HLS metadata.
+    // Media players (VLC, etc.) open files read-only, so size stays identical.
+    // Only a genuine content replacement changes the size.
+    const hlsMeta = await readHlsMetadata(movieId, this.config.hlsDirectory);
+    if (hlsMeta && hlsMeta.sourceSizeBytes === currentSize) {
+      logger.info(`File change ignored (size unchanged — likely player or OS access): ${filename}`);
+      // If the source was previously marked unavailable, restore it now that the file is back
+      if (existing.sourceAvailable === false) {
+        this.registry.update(movieId, { sourceAvailable: true, sourcePath: filePath });
+        logger.info(`Source availability restored for: ${movieId}`);
+      }
+      return;
+    }
 
-    // Clean old HLS
+    // Genuine content change — size differs, re-transcode
+    logger.info(`Movie source content changed (size changed), will re-transcode: ${filename}`);
+    this.registry.update(movieId, { status: 'discovered', error: undefined, sourceAvailable: true });
     await cleanupStaleHls(movieId, this.config.hlsDirectory);
-
-    // Wait for stability, then re-queue
     await this.waitForStableFile(filePath);
     await this.queueTranscoding(movieId, filePath);
   }
@@ -182,14 +210,49 @@ export class MovieWatcher {
     const ext = path.extname(filename).toLowerCase();
     const movieId = generateMovieId(filename);
 
-    // Avoid re-processing an already registered movie
-    if (this.registry.has(movieId)) {
-      const existing = this.registry.get(movieId)!;
-      if (existing.status === 'ready' || existing.status === 'processing' || existing.status === 'queued') {
-        logger.info(`Movie already registered (${existing.status}): ${movieId}`);
-        return;
+    // ── Fix 3: Move-back detection ───────────────────────────────────────────
+    // If this movie is already in the registry (e.g. was marked sourceAvailable:false
+    // after its source was removed), check if the returning file is the same one.
+    const existing = this.registry.get(movieId);
+    if (existing) {
+      const hlsValid = await validateHlsOutput(movieId, this.config.hlsDirectory);
+      if (hlsValid) {
+        const hlsMeta = await readHlsMetadata(movieId, this.config.hlsDirectory);
+        let currentSize = 0;
+        try {
+          const stats = await fs.stat(filePath);
+          currentSize = stats.size;
+        } catch {
+          return; // File already gone
+        }
+
+        if (hlsMeta && hlsMeta.sourceSizeBytes === currentSize) {
+          // Same file moved back — just restore source availability, no re-transcode
+          this.registry.update(movieId, {
+            sourcePath: filePath,
+            sourceAvailable: true,
+            status: 'ready',
+            error: undefined,
+          });
+          logger.info(`Same movie moved back — source restored, no re-transcode needed: ${movieId}`);
+          return;
+        }
+
+        // Different file (size changed) — clean up and fall through to re-transcode
+        logger.info(`Different file detected for ${movieId} — will re-transcode`);
+        await cleanupStaleHls(movieId, this.config.hlsDirectory);
+      } else if (
+        existing.status === 'ready' ||
+        existing.status === 'processing' ||
+        existing.status === 'queued'
+      ) {
+        if (existing.sourceAvailable !== false) {
+          logger.info(`Movie already registered (${existing.status}): ${movieId}`);
+          return;
+        }
       }
     }
+    // ─────────────────────────────────────────────────────────────────────────
 
     let stats: Awaited<ReturnType<typeof fs.stat>>;
     try {
@@ -201,17 +264,29 @@ export class MovieWatcher {
 
     // Register with 'discovered' status initially
     const now = new Date().toISOString();
-    this.registry.add({
-      id: movieId,
-      title: generateMovieTitle(filename),
-      filename,
-      sourcePath: filePath,
-      extension: ext,
-      sizeBytes: stats.size,
-      status: 'discovered',
-      createdAt: now,
-      updatedAt: now,
-    });
+    if (existing) {
+      // Update existing registry entry rather than adding a duplicate
+      this.registry.update(movieId, {
+        sourcePath: filePath,
+        sizeBytes: stats.size,
+        status: 'discovered',
+        sourceAvailable: true,
+        error: undefined,
+      });
+    } else {
+      this.registry.add({
+        id: movieId,
+        title: generateMovieTitle(filename),
+        filename,
+        sourcePath: filePath,
+        extension: ext,
+        sizeBytes: stats.size,
+        status: 'discovered',
+        sourceAvailable: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
 
     // Run ffprobe to get metadata
     try {
@@ -292,6 +367,8 @@ export class MovieWatcher {
           ffmpegPath: this.config.ffmpegPath,
           sourceSizeBytes: stats.size,
           sourceModifiedTime: stats.mtimeMs,
+          title: movie.title,
+          filename: movie.filename,
           onProgress: (percent, profileName) => {
             this.registry.update(movieId, {
               transcodingProgress: percent,

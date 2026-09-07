@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import { config } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { ensureDir } from './utils/filesystem.js';
@@ -8,7 +9,7 @@ import { scanDirectory } from './services/movieScanner.js';
 import { MovieRegistry } from './services/movieRegistry.js';
 import { TranscodingQueue } from './services/transcodingQueue.js';
 import { MovieWatcher } from './services/movieWatcher.js';
-import { checkExistingHls, cleanupStaleHls, cleanupTempDirs, validateHlsOutput } from './services/hlsService.js';
+import { checkExistingHls, cleanupStaleHls, cleanupTempDirs, readHlsMetadata, validateHlsOutput } from './services/hlsService.js';
 import { createHealthRouter } from './routes/healthRoutes.js';
 import { createVideoRouter } from './routes/videoRoutes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
@@ -183,6 +184,8 @@ async function bootstrap(): Promise<void> {
             ffmpegPath: config.ffmpegPath,
             sourceSizeBytes: stats.size,
             sourceModifiedTime: stats.mtimeMs,
+            title: m.title,
+            filename: m.filename,
             onProgress: (percent, profileName) => {
               registry.update(movieId, {
                 transcodingProgress: percent,
@@ -216,21 +219,45 @@ async function bootstrap(): Promise<void> {
     }
   }
 
-  // Clean up HLS directories for movies that no longer exist
+  // Scan HLS directory to register source-less movies
+  // (movies whose source was removed/moved but whose HLS output was preserved)
   try {
     const hlsEntries = await fs.readdir(config.hlsDirectory, { withFileTypes: true });
     for (const entry of hlsEntries) {
       if (!entry.isDirectory()) continue;
       if (entry.name.startsWith('.tmp-')) continue;
+      if (registry.has(entry.name)) continue; // already registered from source scan
 
-      // If no movie in registry has this ID, it's orphaned
-      if (!registry.has(entry.name)) {
-        logger.info(`Removing orphaned HLS directory: ${entry.name}`);
-        await cleanupStaleHls(entry.name, config.hlsDirectory);
-      }
+      // Read rich metadata written at transcode time
+      const metadata = await readHlsMetadata(entry.name, config.hlsDirectory);
+      if (!metadata) continue; // legacy HLS without metadata.json — skip
+
+      const valid = await validateHlsOutput(entry.name, config.hlsDirectory);
+      if (!valid) continue; // broken HLS — skip
+
+      const filename = metadata.filename ?? path.basename(metadata.sourcePath);
+      const now = new Date().toISOString();
+      registry.add({
+        id: entry.name,
+        title: metadata.title ?? generateMovieTitle(filename),
+        filename,
+        sourcePath: '', // source is not present
+        extension: path.extname(filename).toLowerCase(),
+        sizeBytes: metadata.sourceSizeBytes,
+        status: 'ready',
+        sourceAvailable: false,
+        durationSeconds: metadata.durationSeconds,
+        width: metadata.width,
+        height: metadata.height,
+        videoCodec: metadata.videoCodec,
+        audioCodec: metadata.audioCodec,
+        createdAt: metadata.generatedAt,
+        updatedAt: now,
+      });
+      logger.info(`Registered source-less movie from HLS: ${filename} (${entry.name})`);
     }
   } catch {
-    // hlsDirectory may have just been created — nothing to clean
+    // HLS directory may have just been created — nothing to scan
   }
 
   // Step 7: Start file watcher

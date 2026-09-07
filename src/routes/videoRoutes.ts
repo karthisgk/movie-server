@@ -13,6 +13,8 @@ function toPublicMovie(movie: Movie) {
     title: movie.title,
     filename: movie.filename,
     status: movie.status,
+    /** true if the original source file is present; false if only HLS remains */
+    sourceAvailable: movie.sourceAvailable ?? true,
     sizeBytes: movie.sizeBytes,
     durationSeconds: movie.durationSeconds,
     width: movie.width,

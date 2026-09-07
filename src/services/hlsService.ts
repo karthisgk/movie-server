@@ -38,15 +38,11 @@ export async function checkExistingHls(
     return 'stale';
   }
 
-  // Compare source stats
-  if (
-    metadata.sourceSizeBytes !== sourceSizeBytes ||
-    metadata.sourceModifiedTime !== sourceModifiedTime
-  ) {
+  // Compare source size only — mtime is unreliable (players like VLC update it on read)
+  if (metadata.sourceSizeBytes !== sourceSizeBytes) {
     logger.info(
-      `HLS for ${movieId} is stale (source changed: ` +
-        `size ${metadata.sourceSizeBytes} → ${sourceSizeBytes}, ` +
-        `mtime ${metadata.sourceModifiedTime} → ${sourceModifiedTime})`,
+      `HLS for ${movieId} is stale (source size changed: ` +
+        `${metadata.sourceSizeBytes} → ${sourceSizeBytes})`,
     );
     return 'stale';
   }
@@ -88,6 +84,18 @@ export async function validateHlsOutput(movieId: string, hlsDirectory: string): 
     logger.error(`validateHlsOutput: error reading master.m3u8 for ${movieId}`, err);
     return false;
   }
+}
+
+/**
+ * Reads and returns the metadata.json for a given movie's HLS output.
+ * Returns null if the file does not exist or cannot be parsed.
+ */
+export async function readHlsMetadata(
+  movieId: string,
+  hlsDirectory: string,
+): Promise<import('../types/movie.js').HlsMetadata | null> {
+  const metadataFile = path.join(hlsDirectory, movieId, 'metadata.json');
+  return readJsonFile<import('../types/movie.js').HlsMetadata>(metadataFile);
 }
 
 /**

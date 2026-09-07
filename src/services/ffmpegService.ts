@@ -34,6 +34,9 @@ export interface TranscodeOptions {
    * from 0 to 100 across all quality profiles, and the current profile name.
    */
   onProgress?: (percent: number, profileName: string) => void;
+  /** Movie title and filename, stored in metadata.json for source-less registry recovery */
+  title?: string;
+  filename?: string;
 }
 
 /**
@@ -240,12 +243,19 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     // Write master.m3u8
     await writeMasterPlaylist(tempDir, profiles);
 
-    // Write metadata.json for stale detection
+    // Write metadata.json for stale detection and source-less registry recovery
     const metadata: HlsMetadata = {
       sourcePath: inputPath,
       sourceSizeBytes,
       sourceModifiedTime,
       generatedAt: new Date().toISOString(),
+      title: opts.title,
+      filename: opts.filename ?? path.basename(inputPath),
+      durationSeconds: sourceInfo.durationSeconds,
+      width: sourceInfo.width,
+      height: sourceInfo.height,
+      videoCodec: sourceInfo.videoCodec,
+      audioCodec: sourceInfo.audioCodec,
     };
     await writeJsonFile(path.join(tempDir, 'metadata.json'), metadata);
 
