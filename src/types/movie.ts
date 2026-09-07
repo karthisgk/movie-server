@@ -16,6 +16,11 @@ export interface Movie {
 
   status: MovieStatus;
 
+  /** Transcoding progress percentage (0–100). Only meaningful when status === 'processing'. */
+  transcodingProgress?: number;
+  /** The quality profile currently being transcoded, e.g. '480p', '720p', '1080p'. */
+  transcodingProfile?: string;
+
   durationSeconds?: number;
 
   width?: number;

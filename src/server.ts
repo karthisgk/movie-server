@@ -183,17 +183,34 @@ async function bootstrap(): Promise<void> {
             ffmpegPath: config.ffmpegPath,
             sourceSizeBytes: stats.size,
             sourceModifiedTime: stats.mtimeMs,
+            onProgress: (percent, profileName) => {
+              registry.update(movieId, {
+                transcodingProgress: percent,
+                transcodingProfile: profileName,
+              });
+              logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
+            },
           });
 
           const valid = await validateHlsOutput(movieId, config.hlsDirectory);
           if (!valid) throw new Error('HLS output validation failed');
 
-          registry.update(movieId, { status: 'ready', error: undefined });
+          registry.update(movieId, {
+            status: 'ready',
+            error: undefined,
+            transcodingProgress: undefined,
+            transcodingProfile: undefined,
+          });
           logger.info(`FFmpeg completed: ${movieId}`);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error(`FFmpeg failed: ${movieId} — ${msg}`);
-          registry.update(movieId, { status: 'failed', error: 'Transcoding failed' });
+          registry.update(movieId, {
+            status: 'failed',
+            error: 'Transcoding failed',
+            transcodingProgress: undefined,
+            transcodingProfile: undefined,
+          });
         }
       });
     }

@@ -29,6 +29,11 @@ export interface TranscodeOptions {
   sourceModifiedTime: number;
   // Optional cancellation signal
   signal?: AbortSignal;
+  /**
+   * Called periodically during transcoding with an overall progress value
+   * from 0 to 100 across all quality profiles, and the current profile name.
+   */
+  onProgress?: (percent: number, profileName: string) => void;
 }
 
 /**
@@ -181,6 +186,8 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     sourceSizeBytes,
     sourceModifiedTime,
     signal,
+    onProgress,
+    sourceInfo,
   } = opts;
 
   const finalDir = path.join(hlsDirectory, movieId);
@@ -190,15 +197,44 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   await safeRemoveDir(tempDir);
   await ensureDir(tempDir);
 
+  const totalProfiles = profiles.length;
+
   try {
-    for (const profile of profiles) {
+    for (let i = 0; i < profiles.length; i++) {
+      const profile = profiles[i];
       if (signal?.aborted) throw new Error('Transcoding cancelled');
 
       const profileDir = path.join(tempDir, profile.name);
       await ensureDir(profileDir);
 
-      await transcodeProfile(inputPath, profileDir, profile, segmentDuration, ffmpegPath, signal);
+      // Each profile gets an equal share of the overall 0–100% range.
+      // e.g. with 3 profiles: 0–33%, 33–66%, 66–100%
+      const profileStart = (i / totalProfiles) * 100;
+      const profileEnd = ((i + 1) / totalProfiles) * 100;
+
+      await transcodeProfile(
+        inputPath,
+        profileDir,
+        profile,
+        segmentDuration,
+        ffmpegPath,
+        sourceInfo.durationSeconds,
+        signal,
+        onProgress
+          ? (innerPercent: number) => {
+              const overall = Math.round(
+                profileStart + (innerPercent / 100) * (profileEnd - profileStart),
+              );
+              onProgress(overall, profile.name);
+            }
+          : undefined,
+      );
       logger.info(`FFmpeg completed ${profile.name} for ${movieId}`);
+    }
+
+    // Signal 100% when all profiles are done
+    if (onProgress && profiles.length > 0) {
+      onProgress(100, profiles[profiles.length - 1].name);
     }
 
     // Write master.m3u8
@@ -233,7 +269,9 @@ function transcodeProfile(
   profile: QualityProfile,
   segmentDuration: number,
   ffmpegPath: string,
+  durationSeconds: number,
   signal?: AbortSignal,
+  onProgress?: (percent: number) => void,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -272,6 +310,8 @@ function transcodeProfile(
       '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', segmentPattern,
       '-hls_flags', 'independent_segments',
+      '-progress', 'pipe:2',  // Write progress to stderr in key=value format
+      '-nostats',
       playlistPath,
     ];
 
@@ -280,9 +320,41 @@ function transcodeProfile(
     const proc = spawn(ffmpegPath, args, { stdio: 'pipe' });
 
     let stderrOutput = '';
+    let stderrBuffer = '';
 
+    // Parse FFmpeg progress lines from stderr.
+    // FFmpeg with -progress pipe:2 writes key=value pairs; we look for out_time_us
+    // and fall back to the human-readable "time=HH:MM:SS.xx" pattern.
     proc.stderr.on('data', (chunk: Buffer) => {
-      stderrOutput += chunk.toString();
+      const text = chunk.toString();
+      stderrOutput += text;
+      stderrBuffer += text;
+
+      // Process complete lines
+      const lines = stderrBuffer.split('\n');
+      stderrBuffer = lines.pop() ?? ''; // keep incomplete last line
+
+      for (const line of lines) {
+        // -progress pipe:2 emits: out_time_us=<microseconds>
+        const usMatch = line.match(/^out_time_us=(\d+)/);
+        if (usMatch && durationSeconds > 0 && onProgress) {
+          const elapsedSec = parseInt(usMatch[1], 10) / 1_000_000;
+          const pct = Math.min(99, Math.round((elapsedSec / durationSeconds) * 100));
+          onProgress(pct);
+          continue;
+        }
+
+        // Fallback: human-readable "time=HH:MM:SS.xx" from regular FFmpeg output
+        const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.\d+)/);
+        if (timeMatch && durationSeconds > 0 && onProgress) {
+          const elapsed =
+            parseInt(timeMatch[1], 10) * 3600 +
+            parseInt(timeMatch[2], 10) * 60 +
+            parseFloat(timeMatch[3]);
+          const pct = Math.min(99, Math.round((elapsed / durationSeconds) * 100));
+          onProgress(pct);
+        }
+      }
     });
 
     if (signal) {

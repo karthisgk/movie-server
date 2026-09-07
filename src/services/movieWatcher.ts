@@ -292,6 +292,13 @@ export class MovieWatcher {
           ffmpegPath: this.config.ffmpegPath,
           sourceSizeBytes: stats.size,
           sourceModifiedTime: stats.mtimeMs,
+          onProgress: (percent, profileName) => {
+            this.registry.update(movieId, {
+              transcodingProgress: percent,
+              transcodingProfile: profileName,
+            });
+            logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
+          },
         });
 
         // Validate the output
@@ -300,12 +307,22 @@ export class MovieWatcher {
           throw new Error('HLS output validation failed: files missing after transcoding');
         }
 
-        this.registry.update(movieId, { status: 'ready', error: undefined });
+        this.registry.update(movieId, {
+          status: 'ready',
+          error: undefined,
+          transcodingProgress: undefined,
+          transcodingProfile: undefined,
+        });
         logger.info(`FFmpeg completed: ${movieId} — status: ready`);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.error(`FFmpeg failed: ${movieId} — ${message}`);
-        this.registry.update(movieId, { status: 'failed', error: 'Transcoding failed' });
+        this.registry.update(movieId, {
+          status: 'failed',
+          error: 'Transcoding failed',
+          transcodingProgress: undefined,
+          transcodingProfile: undefined,
+        });
       }
     });
   }

@@ -22,6 +22,12 @@ function toPublicMovie(movie: Movie) {
     createdAt: movie.createdAt,
     updatedAt: movie.updatedAt,
     playUrl: `/videos/${movie.id}/play`,
+    ...(movie.status === 'processing'
+      ? {
+          transcodingProgress: movie.transcodingProgress ?? 0,
+          transcodingProfile: movie.transcodingProfile ?? null,
+        }
+      : {}),
     ...(movie.status === 'failed' && movie.error ? { error: movie.error } : {}),
   };
 }
@@ -51,6 +57,31 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string)
     }
 
     res.json(toPublicMovie(movie));
+  });
+
+  // ─── GET /videos/:id/progress ──────────────────────────────────────────────
+  router.get('/videos/:id/progress', (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    if (!id || !isValidMovieId(id)) {
+      res.status(400).json({ error: 'Invalid movie ID' });
+      return;
+    }
+
+    const movie = registry.get(id);
+    if (!movie) {
+      res.status(404).json({ error: 'Movie not found' });
+      return;
+    }
+
+    res.json({
+      id: movie.id,
+      status: movie.status,
+      /** 0–100, only meaningful when status === 'processing' */
+      progress: movie.status === 'processing' ? (movie.transcodingProgress ?? 0) : null,
+      /** Current quality profile being transcoded (e.g. '720p'), or null */
+      profile: movie.status === 'processing' ? (movie.transcodingProfile ?? null) : null,
+    });
   });
 
   // ─── GET /videos/:id/play ──────────────────────────────────────────────────
