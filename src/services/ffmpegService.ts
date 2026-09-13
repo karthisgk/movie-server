@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
-import { ensureDir, moveDir, safeRemoveDir, writeJsonFile } from '../utils/filesystem.js';
+import { ensureDir, writeJsonFile } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { HlsMetadata } from '../types/movie.js';
 
@@ -31,9 +31,21 @@ export interface TranscodeOptions {
   signal?: AbortSignal;
   /**
    * Called periodically during transcoding with an overall progress value
-   * from 0 to 100 across all quality profiles, and the current profile name.
+   * from 0 to 100 across all remaining (not-yet-completed) quality profiles,
+   * and the current profile name.
    */
   onProgress?: (percent: number, profileName: string) => void;
+  /**
+   * Called immediately after each quality profile finishes.
+   * `completedSoFar` contains all profiles (including any pre-existing ones)
+   * that are done at this point.
+   */
+  onProfileComplete?: (profile: QualityProfile, completedSoFar: QualityProfile[]) => void;
+  /**
+   * Profiles that were already transcoded before this call (crash-recovery).
+   * These will be skipped during transcoding but included in master.m3u8 output.
+   */
+  alreadyCompleted?: QualityProfile[];
   /** Movie title and filename, stored in metadata.json for source-less registry recovery */
   title?: string;
   filename?: string;
@@ -168,15 +180,38 @@ export function selectQualityProfiles(
 }
 
 /**
+ * Scans an HLS output directory and returns which quality profiles have
+ * already been fully transcoded (i.e. their playlist.m3u8 exists).
+ * Used for crash-recovery: allows resuming from where we left off.
+ */
+export async function detectCompletedProfiles(
+  movieId: string,
+  hlsDirectory: string,
+  allProfiles: QualityProfile[],
+): Promise<QualityProfile[]> {
+  const completed: QualityProfile[] = [];
+  for (const profile of allProfiles) {
+    const playlistPath = path.join(hlsDirectory, movieId, profile.name, 'playlist.m3u8');
+    try {
+      await fs.access(playlistPath);
+      completed.push(profile);
+    } catch {
+      // playlist doesn't exist — not done
+    }
+  }
+  return completed;
+}
+
+/**
  * Transcodes a movie to HLS using FFmpeg.
  *
  * Process:
- *   1. Create a temp output directory
- *   2. Transcode each quality profile with FFmpeg
- *   3. Write master.m3u8
- *   4. Write metadata.json
- *   5. Atomically rename temp dir to final dir
- *   6. On failure: clean up temp dir
+ *   1. Sort profiles descending (1080p → 720p → 480p) — best quality first
+ *   2. Skip profiles already completed (crash-recovery via alreadyCompleted)
+ *   3. Write each profile directly to <hlsDirectory>/<movieId>/<profileName>/
+ *   4. After each profile: update master.m3u8 with all completed variants so far
+ *      → movie becomes playable as soon as the first profile finishes
+ *   5. Write metadata.json when all profiles are done
  */
 export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   const {
@@ -190,30 +225,37 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     sourceModifiedTime,
     signal,
     onProgress,
+    onProfileComplete,
+    alreadyCompleted = [],
     sourceInfo,
   } = opts;
 
   const finalDir = path.join(hlsDirectory, movieId);
-  const tempDir = path.join(hlsDirectory, `.tmp-${movieId}`);
+  await ensureDir(finalDir);
 
-  // Remove any leftover temp dir from a previous failed run
-  await safeRemoveDir(tempDir);
-  await ensureDir(tempDir);
+  // Sort profiles highest-quality first (1080p → 720p → 480p)
+  const sortedProfiles = [...profiles].sort((a, b) => b.height - a.height);
 
-  const totalProfiles = profiles.length;
+  // Build the list of profiles we still need to transcode
+  const alreadyDoneNames = new Set(alreadyCompleted.map((p) => p.name));
+  const toTranscode = sortedProfiles.filter((p) => !alreadyDoneNames.has(p.name));
+
+  // Track all completed profiles (pre-existing + newly done), sorted highest first
+  const completedProfiles: QualityProfile[] = [...alreadyCompleted].sort((a, b) => b.height - a.height);
+
+  const totalToTranscode = toTranscode.length;
 
   try {
-    for (let i = 0; i < profiles.length; i++) {
-      const profile = profiles[i];
+    for (let i = 0; i < toTranscode.length; i++) {
+      const profile = toTranscode[i];
       if (signal?.aborted) throw new Error('Transcoding cancelled');
 
-      const profileDir = path.join(tempDir, profile.name);
+      const profileDir = path.join(finalDir, profile.name);
       await ensureDir(profileDir);
 
-      // Each profile gets an equal share of the overall 0–100% range.
-      // e.g. with 3 profiles: 0–33%, 33–66%, 66–100%
-      const profileStart = (i / totalProfiles) * 100;
-      const profileEnd = ((i + 1) / totalProfiles) * 100;
+      // Each remaining profile gets an equal share of the overall 0–100% range.
+      const profileStart = (i / totalToTranscode) * 100;
+      const profileEnd = ((i + 1) / totalToTranscode) * 100;
 
       await transcodeProfile(
         inputPath,
@@ -233,17 +275,27 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
           : undefined,
       );
       logger.info(`FFmpeg completed ${profile.name} for ${movieId}`);
+
+      // Mark this profile as done and update master.m3u8 immediately
+      // so the movie is playable as soon as any profile finishes.
+      completedProfiles.push(profile);
+      completedProfiles.sort((a, b) => b.height - a.height); // keep sorted
+      await writeMasterPlaylist(finalDir, completedProfiles);
+      logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
+
+      // Notify orchestrator so it can flip status to 'partial' / update registry
+      if (onProfileComplete) {
+        onProfileComplete(profile, [...completedProfiles]);
+      }
     }
 
     // Signal 100% when all profiles are done
-    if (onProgress && profiles.length > 0) {
-      onProgress(100, profiles[profiles.length - 1].name);
+    if (onProgress && totalToTranscode > 0) {
+      onProgress(100, toTranscode[toTranscode.length - 1].name);
     }
 
-    // Write master.m3u8
-    await writeMasterPlaylist(tempDir, profiles);
-
     // Write metadata.json for stale detection and source-less registry recovery
+    const allCompleted = [...completedProfiles];
     const metadata: HlsMetadata = {
       sourcePath: inputPath,
       sourceSizeBytes,
@@ -256,19 +308,15 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
       height: sourceInfo.height,
       videoCodec: sourceInfo.videoCodec,
       audioCodec: sourceInfo.audioCodec,
+      completedProfiles: allCompleted.map((p) => p.name),
     };
-    await writeJsonFile(path.join(tempDir, 'metadata.json'), metadata);
-
-    // Atomic move: temp → final
-    if (await directoryExists(finalDir)) {
-      await safeRemoveDir(finalDir);
-    }
-    await moveDir(tempDir, finalDir);
+    await writeJsonFile(path.join(finalDir, 'metadata.json'), metadata);
 
     logger.info(`HLS output ready: ${finalDir}`);
   } catch (err) {
-    // Cleanup temp directory on failure
-    await safeRemoveDir(tempDir);
+    // Do NOT delete the output directory on failure — partial output is kept
+    // so crash-recovery can resume from the completed profiles on next start.
+    logger.warn(`Transcoding interrupted for ${movieId} — partial output preserved for recovery`);
     throw err;
   }
 }
@@ -413,11 +461,3 @@ async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]
   await fs.writeFile(path.join(outputDir, 'master.m3u8'), content, 'utf-8');
 }
 
-async function directoryExists(dirPath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(dirPath);
-    return stat.isDirectory();
-  } catch {
-    return false;
-  }
-}

@@ -4,12 +4,12 @@ import path from 'path';
 import { config } from './config/env.js';
 import { logger } from './utils/logger.js';
 import { ensureDir } from './utils/filesystem.js';
-import { validateFfmpeg, validateFfprobe, getMediaInfo, selectQualityProfiles, transcodeToHls } from './services/ffmpegService.js';
+import { validateFfmpeg, validateFfprobe, getMediaInfo, selectQualityProfiles, transcodeToHls, detectCompletedProfiles } from './services/ffmpegService.js';
 import { scanDirectory } from './services/movieScanner.js';
 import { MovieRegistry } from './services/movieRegistry.js';
 import { TranscodingQueue } from './services/transcodingQueue.js';
 import { MovieWatcher } from './services/movieWatcher.js';
-import { checkExistingHls, cleanupStaleHls, cleanupTempDirs, readHlsMetadata, validateHlsOutput } from './services/hlsService.js';
+import { checkExistingHls, cleanupStaleHls, readHlsMetadata, validateHlsOutput } from './services/hlsService.js';
 import { createHealthRouter } from './routes/healthRoutes.js';
 import { createVideoRouter } from './routes/videoRoutes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
@@ -48,7 +48,7 @@ async function bootstrap(): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2: Ensure directories exist
+  // Step 3: Ensure directories exist (no temp dirs to clean up any more)
   logger.info(`Movie directory: ${config.movieDirectory}`);
   try {
     await ensureDir(config.movieDirectory);
@@ -60,9 +60,6 @@ async function bootstrap(): Promise<void> {
 
   logger.info(`HLS directory: ${config.hlsDirectory}`);
   await ensureDir(config.hlsDirectory);
-
-  // Step 3: Clean up leftover temp HLS directories from crashed runs
-  await cleanupTempDirs(config.hlsDirectory);
 
   // Step 4: Create registry and queue
   const registry = new MovieRegistry();
@@ -108,14 +105,25 @@ async function bootstrap(): Promise<void> {
       continue;
     }
 
-    // Check existing HLS
+    // Check existing HLS (pass expected profiles so 'partial' can be detected)
     const movie = registry.get(movieId)!;
+    const expectedProfiles = selectQualityProfiles(
+      movie.height ?? 0,
+      {
+        transcode480p: config.transcode480p,
+        transcode720p: config.transcode720p,
+        transcode1080p: config.transcode1080p,
+      },
+      QUALITY_PROFILES,
+    ).map((p) => p.name);
+
     const hlsStatus = await checkExistingHls(
       movieId,
       config.hlsDirectory,
       scanned.filePath,
       scanned.sizeBytes,
       scanned.modifiedTime,
+      expectedProfiles,
     );
 
     if (hlsStatus === 'ready') {
@@ -128,6 +136,20 @@ async function bootstrap(): Promise<void> {
         logger.warn(`HLS for ${movieId} failed validation — will re-transcode`);
         await cleanupStaleHls(movieId, config.hlsDirectory);
       }
+    } else if (hlsStatus === 'partial') {
+      // Some profiles done, some missing — resume transcoding from where we left off.
+      // Mark as 'partial' right now so the movie is immediately playable.
+      logger.info(`Partial HLS for ${movieId} — will resume missing profiles`);
+      const completedProfiles = await detectCompletedProfiles(
+        movieId,
+        config.hlsDirectory,
+        QUALITY_PROFILES,
+      );
+      registry.update(movieId, {
+        status: 'partial',
+        completedProfiles: completedProfiles.map((p) => p.name),
+      });
+      // Fall through to queue — alreadyCompleted will be picked up inside the job
     } else if (hlsStatus === 'stale') {
       logger.info(`Stale HLS for ${movieId} — will re-transcode`);
       await cleanupStaleHls(movieId, config.hlsDirectory);
@@ -135,19 +157,21 @@ async function bootstrap(): Promise<void> {
 
     // Queue transcoding if AUTO_TRANSCODE is on
     if (config.autoTranscode) {
-      registry.update(movieId, { status: 'queued' });
+      const m = registry.get(movieId)!;
+      // Skip if already marked partial (already queued via resume path above)
+      if (m.status !== 'partial') {
+        registry.update(movieId, { status: 'queued' });
+      }
       logger.info(`Queued transcoding: ${movieId}`);
 
       const filePath = scanned.filePath;
 
       queue.enqueue(movieId, async () => {
-        const m = registry.get(movieId);
-        if (!m) return;
+        const mov = registry.get(movieId);
+        if (!mov) return;
 
-        registry.update(movieId, { status: 'processing' });
-
-        const profiles = selectQualityProfiles(
-          m.height ?? 0,
+        const allProfiles = selectQualityProfiles(
+          mov.height ?? 0,
           {
             transcode480p: config.transcode480p,
             transcode720p: config.transcode720p,
@@ -156,12 +180,26 @@ async function bootstrap(): Promise<void> {
           QUALITY_PROFILES,
         );
 
-        if (profiles.length === 0) {
+        if (allProfiles.length === 0) {
           registry.update(movieId, {
             status: 'failed',
             error: 'No suitable quality profiles for this resolution',
           });
           return;
+        }
+
+        // Detect already-completed profiles for crash-recovery
+        const alreadyCompleted = await detectCompletedProfiles(movieId, config.hlsDirectory, allProfiles);
+        if (alreadyCompleted.length > 0) {
+          logger.info(
+            `Startup resume for ${movieId} — already done: ${alreadyCompleted.map((p) => p.name).join(', ')}`,
+          );
+          registry.update(movieId, {
+            status: 'partial',
+            completedProfiles: alreadyCompleted.map((p) => p.name),
+          });
+        } else {
+          registry.update(movieId, { status: 'processing' });
         }
 
         try {
@@ -171,27 +209,39 @@ async function bootstrap(): Promise<void> {
             inputPath: filePath,
             hlsDirectory: config.hlsDirectory,
             segmentDuration: config.hlsSegmentDuration,
-            profiles,
+            profiles: allProfiles,
+            alreadyCompleted,
             sourceInfo: {
-              durationSeconds: m.durationSeconds ?? 0,
-              width: m.width ?? 0,
-              height: m.height ?? 0,
-              videoCodec: m.videoCodec ?? '',
-              audioCodec: m.audioCodec ?? '',
+              durationSeconds: mov.durationSeconds ?? 0,
+              width: mov.width ?? 0,
+              height: mov.height ?? 0,
+              videoCodec: mov.videoCodec ?? '',
+              audioCodec: mov.audioCodec ?? '',
               hasVideo: true,
-              hasAudio: !!m.audioCodec,
+              hasAudio: !!mov.audioCodec,
             },
             ffmpegPath: config.ffmpegPath,
             sourceSizeBytes: stats.size,
             sourceModifiedTime: stats.mtimeMs,
-            title: m.title,
-            filename: m.filename,
+            title: mov.title,
+            filename: mov.filename,
             onProgress: (percent, profileName) => {
               registry.update(movieId, {
                 transcodingProgress: percent,
                 transcodingProfile: profileName,
               });
               logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
+            },
+            onProfileComplete: (_profile, completedSoFar) => {
+              const names = completedSoFar.map((p) => p.name);
+              const isFirstDone = completedSoFar.length === 1 && alreadyCompleted.length === 0;
+              registry.update(movieId, {
+                ...(isFirstDone ? { status: 'partial' as const } : {}),
+                completedProfiles: names,
+              });
+              if (isFirstDone) {
+                logger.info(`Movie is now playable (partial): ${movieId} — first profile done: ${names[0]}`);
+              }
             },
           });
 

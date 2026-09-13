@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import chokidar, { FSWatcher } from 'chokidar';
 import { isSupportedExtension } from './movieScanner.js';
 import { MovieRegistry } from './movieRegistry.js';
-import { getMediaInfo, selectQualityProfiles, transcodeToHls } from './ffmpegService.js';
+import { getMediaInfo, selectQualityProfiles, transcodeToHls, detectCompletedProfiles } from './ffmpegService.js';
 import { checkExistingHls, cleanupStaleHls, readHlsMetadata, validateHlsOutput } from './hlsService.js';
 import { TranscodingQueue } from './transcodingQueue.js';
 import { AppConfig } from '../config/env.js';
@@ -310,14 +310,15 @@ export class MovieWatcher {
     }
   }
 
-  private async queueTranscoding(movieId: string, filePath: string): Promise<void> {
+  private async queueTranscoding(movieId: string, filePath: string, resumeProfiles?: import('../types/movie.js').QualityProfile[]): Promise<void> {
     if (this.queue.isPending(movieId)) {
       logger.info(`Transcoding already pending for: ${movieId}`);
       return;
     }
 
+    const statusLabel = resumeProfiles && resumeProfiles.length > 0 ? 'queued (resuming)' : 'queued';
     this.registry.update(movieId, { status: 'queued' });
-    logger.info(`Queued transcoding: ${movieId}`);
+    logger.info(`${statusLabel}: ${movieId}`);
 
     this.queue.enqueue(movieId, async () => {
       const movie = this.registry.get(movieId);
@@ -328,7 +329,7 @@ export class MovieWatcher {
 
       this.registry.update(movieId, { status: 'processing' });
 
-      const profiles = selectQualityProfiles(
+      const allProfiles = selectQualityProfiles(
         movie.height ?? 0,
         {
           transcode480p: this.config.transcode480p,
@@ -338,13 +339,28 @@ export class MovieWatcher {
         QUALITY_PROFILES,
       );
 
-      if (profiles.length === 0) {
+      if (allProfiles.length === 0) {
         logger.warn(`No suitable quality profiles for ${movieId} (height: ${movie.height})`);
         this.registry.update(movieId, {
           status: 'failed',
           error: 'No suitable quality profiles determined for this source resolution',
         });
         return;
+      }
+
+      // Determine which profiles are already done (from a previous crashed run)
+      const alreadyCompleted = resumeProfiles ??
+        await detectCompletedProfiles(movieId, this.config.hlsDirectory, allProfiles);
+
+      if (alreadyCompleted.length > 0) {
+        logger.info(
+          `Resuming transcoding for ${movieId} — already done: ${alreadyCompleted.map((p) => p.name).join(', ')}`,
+        );
+        // The movie already has some profiles — treat it as partial immediately
+        this.registry.update(movieId, {
+          status: 'partial',
+          completedProfiles: alreadyCompleted.map((p) => p.name),
+        });
       }
 
       try {
@@ -354,7 +370,8 @@ export class MovieWatcher {
           inputPath: filePath,
           hlsDirectory: this.config.hlsDirectory,
           segmentDuration: this.config.hlsSegmentDuration,
-          profiles,
+          profiles: allProfiles,
+          alreadyCompleted,
           sourceInfo: {
             durationSeconds: movie.durationSeconds ?? 0,
             width: movie.width ?? 0,
@@ -375,6 +392,19 @@ export class MovieWatcher {
               transcodingProfile: profileName,
             });
             logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
+          },
+          onProfileComplete: (_profile, completedSoFar) => {
+            const names = completedSoFar.map((p) => p.name);
+            const isFirstDone = completedSoFar.length === 1 && alreadyCompleted.length === 0;
+            // Flip to 'partial' on the first newly-completed profile so the /play route opens up
+            const newStatus = isFirstDone ? 'partial' : undefined;
+            this.registry.update(movieId, {
+              ...(newStatus ? { status: newStatus as import('../types/movie.js').MovieStatus } : {}),
+              completedProfiles: names,
+            });
+            if (isFirstDone) {
+              logger.info(`Movie is now playable (partial): ${movieId} — first profile done: ${names[0]}`);
+            }
           },
         });
 

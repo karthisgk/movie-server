@@ -2,6 +2,7 @@ export type MovieStatus =
   | 'discovered'
   | 'queued'
   | 'processing'
+  | 'partial'    // ≥1 profile done — movie is playable but still transcoding
   | 'ready'
   | 'failed';
 
@@ -16,10 +17,12 @@ export interface Movie {
 
   status: MovieStatus;
 
-  /** Transcoding progress percentage (0–100). Only meaningful when status === 'processing'. */
+  /** Transcoding progress percentage (0–100). Only meaningful when status === 'processing' or 'partial'. */
   transcodingProgress?: number;
   /** The quality profile currently being transcoded, e.g. '480p', '720p', '1080p'. */
   transcodingProfile?: string;
+  /** Quality profiles that have finished transcoding, e.g. ['1080p', '720p']. */
+  completedProfiles?: string[];
 
   /**
    * Whether the original source file is still present on disk.
@@ -56,6 +59,8 @@ export interface HlsMetadata {
   height?: number;
   videoCodec?: string;
   audioCodec?: string;
+  /** Profiles that completed before a crash — used to resume partial transcoding on restart. */
+  completedProfiles?: string[];
 }
 
 export interface QualityProfile {

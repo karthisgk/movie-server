@@ -8,6 +8,7 @@ import { logger } from '../utils/logger.js';
 
 /** Public-facing movie representation — no internal filesystem paths */
 function toPublicMovie(movie: Movie) {
+  const isActivelyTranscoding = movie.status === 'processing' || movie.status === 'partial';
   return {
     id: movie.id,
     title: movie.title,
@@ -24,11 +25,16 @@ function toPublicMovie(movie: Movie) {
     createdAt: movie.createdAt,
     updatedAt: movie.updatedAt,
     playUrl: `/videos/${movie.id}/play`,
-    ...(movie.status === 'processing'
+    ...(isActivelyTranscoding
       ? {
           transcodingProgress: movie.transcodingProgress ?? 0,
           transcodingProfile: movie.transcodingProfile ?? null,
+          /** Profiles that have finished transcoding and are available to stream. */
+          completedProfiles: movie.completedProfiles ?? [],
         }
+      : {}),
+    ...(movie.status === 'ready' && movie.completedProfiles
+      ? { completedProfiles: movie.completedProfiles }
       : {}),
     ...(movie.status === 'failed' && movie.error ? { error: movie.error } : {}),
   };
@@ -104,14 +110,17 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string)
 
     switch (movie.status) {
       case 'ready':
-        // Redirect to the HLS master playlist
+      case 'partial':
+        // Redirect to the HLS master playlist (partial = at least one profile ready)
         res.redirect(302, `/hls/${id}/master.m3u8`);
         break;
 
       case 'processing':
         res.status(409).json({
-          error: 'Movie is still being processed',
+          error: 'Movie is still being processed — no quality profile ready yet',
           status: movie.status,
+          transcodingProgress: movie.transcodingProgress ?? 0,
+          transcodingProfile: movie.transcodingProfile ?? null,
         });
         break;
 

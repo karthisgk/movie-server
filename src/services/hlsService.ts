@@ -4,14 +4,15 @@ import { HlsMetadata } from '../types/movie.js';
 import { fileExists, readJsonFile, safeRemoveDir } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 
-export type HlsStatus = 'ready' | 'stale' | 'missing';
+export type HlsStatus = 'ready' | 'partial' | 'stale' | 'missing';
 
 /**
  * Checks whether valid HLS output already exists for a given movie.
  *
  * Returns:
- *  - 'ready'  — master.m3u8 exists and source file matches metadata
- *  - 'stale'  — HLS exists but source file changed (different size or mtime)
+ *  - 'ready'   — master.m3u8 exists, all expected profiles present, source matches metadata
+ *  - 'partial' — HLS exists, source matches, but some profiles are missing (crash recovery)
+ *  - 'stale'   — HLS exists but source file changed (different size)
  *  - 'missing' — no HLS output found
  */
 export async function checkExistingHls(
@@ -20,12 +21,23 @@ export async function checkExistingHls(
   sourcePath: string,
   sourceSizeBytes: number,
   sourceModifiedTime: number,
+  expectedProfiles?: string[],
 ): Promise<HlsStatus> {
   const hlsDir = path.join(hlsDirectory, movieId);
   const masterPlaylist = path.join(hlsDir, 'master.m3u8');
   const metadataFile = path.join(hlsDir, 'metadata.json');
 
   if (!(await fileExists(masterPlaylist))) {
+    // Check if any profile subdirs exist at all (crash before first master.m3u8 write)
+    if (expectedProfiles) {
+      for (const p of expectedProfiles) {
+        if (await fileExists(path.join(hlsDir, p, 'playlist.m3u8'))) {
+          // At least one profile is done but master.m3u8 not yet written
+          logger.info(`HLS for ${movieId}: partial output detected (no master.m3u8 yet)`);
+          return 'partial';
+        }
+      }
+    }
     return 'missing';
   }
 
@@ -45,6 +57,20 @@ export async function checkExistingHls(
         `${metadata.sourceSizeBytes} → ${sourceSizeBytes})`,
     );
     return 'stale';
+  }
+
+  // Source matches — check if all expected profiles are present
+  if (expectedProfiles && expectedProfiles.length > 0) {
+    const missingProfiles: string[] = [];
+    for (const p of expectedProfiles) {
+      if (!(await fileExists(path.join(hlsDir, p, 'playlist.m3u8')))) {
+        missingProfiles.push(p);
+      }
+    }
+    if (missingProfiles.length > 0) {
+      logger.info(`HLS for ${movieId} is partial — missing profiles: ${missingProfiles.join(', ')}`);
+      return 'partial';
+    }
   }
 
   logger.info(`HLS for ${movieId} is valid and up to date`);

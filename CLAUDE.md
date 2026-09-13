@@ -14,8 +14,9 @@ src/
 │   ├── movieScanner.ts     — Flat directory scan for video files
 │   ├── movieRegistry.ts    — In-memory Map<id, Movie> registry
 │   ├── ffmpegService.ts    — ffprobe metadata + FFmpeg HLS transcoding (spawn, no shell strings)
+│   │                         detectCompletedProfiles() for crash-recovery
 │   ├── transcodingQueue.ts — Concurrency-limited job queue
-│   ├── hlsService.ts       — HLS stale detection, validation, cleanup
+│   ├── hlsService.ts       — HLS stale/partial detection, validation, cleanup
 │   └── movieWatcher.ts     — Chokidar file watcher → full pipeline orchestrator
 ├── routes/
 │   ├── healthRoutes.ts     — GET /health
@@ -38,10 +39,31 @@ npm test          # vitest run
 
 - **No database** — filesystem is source of truth, in-memory registry rebuilt on restart
 - **spawn() not exec()** — all FFmpeg/ffprobe calls use spawn with arg arrays to safely handle filenames with spaces, parentheses, Unicode
-- **Atomic HLS output** — FFmpeg writes to `.tmp-<id>/`, renamed to `<id>/` only on success
+- **Progressive HLS output** — FFmpeg writes each profile directly to `<id>/<profileName>/`; `master.m3u8` is updated after each profile, so movies are playable as soon as the first quality variant is ready
+- **Transcoding order: 1080p→720p→480p** — best quality first; status becomes `'partial'` (playable) as soon as 1080p finishes
+- **No temp dir / no atomic rename** — partial output is preserved intentionally; crash-recovery resumes only the missing profiles on next start
+- **Crash recovery** — `detectCompletedProfiles()` checks which `<profileName>/playlist.m3u8` files already exist and skips those profiles on resume
 - **Stale detection** — `metadata.json` stores source size + mtime; checked on every restart
 - **No upscaling** — quality profiles filtered against source height
 - **Path traversal protection** — all HLS paths verified to stay within hlsDirectory root
+
+## Movie Status Lifecycle
+
+```
+discovered → queued → processing → partial → ready
+                                    ↑
+                         First profile done (e.g. 1080p)
+                         /play now redirects to master.m3u8
+```
+
+| Status | `/play` response | Notes |
+|--------|-----------------|-------|
+| `discovered` | 409 | Not yet queued |
+| `queued` | 409 | Waiting in queue |
+| `processing` | 409 | Transcoding, no profile done yet |
+| `partial` | 302 → master.m3u8 | ≥1 profile done — streamable now |
+| `ready` | 302 → master.m3u8 | All profiles done |
+| `failed` | 500 | Transcoding failed |
 
 ## Movie ID Generation
 
