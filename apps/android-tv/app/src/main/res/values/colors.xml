@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Background colors -->
+    <color name="background_dark">#0D0D0F</color>
+    <color name="background_card">#1A1A1F</color>
+    <color name="background_surface">#16161B</color>
+
+    <!-- Brand & accent -->
+    <color name="brand_color">#1C1C2E</color>
+    <color name="accent_color">#7C4DFF</color>
+    <color name="accent_light">#B388FF</color>
+
+    <!-- Status colors -->
+    <color name="color_ready">#4CAF50</color>
+    <color name="color_processing">#2196F3</color>
+    <color name="color_queued">#9E9E9E</color>
+    <color name="color_failed">#F44336</color>
+
+    <!-- Text -->
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#AAFFFFFF</color>
+    <color name="text_disabled">#66FFFFFF</color>
+</resources>

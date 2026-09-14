@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/background_dark"
+    android:padding="48dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxWidth="560dp"
+        android:orientation="vertical">
+
+        <!-- Title -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="32dp"
+            android:fontFamily="sans-serif-medium"
+            android:text="@string/settings_title"
+            android:textColor="@android:color/white"
+            android:textSize="28sp" />
+
+        <!-- Host label -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="@string/settings_host_label"
+            android:textColor="#AAFFFFFF"
+            android:textSize="14sp" />
+
+        <!-- Host input -->
+        <EditText
+            android:id="@+id/et_host"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:background="@drawable/input_background"
+            android:hint="192.168.0.10"
+            android:inputType="textUri"
+            android:maxLines="1"
+            android:padding="16dp"
+            android:textColor="@android:color/white"
+            android:textColorHint="#66FFFFFF"
+            android:textSize="18sp" />
+
+        <!-- Port label -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="@string/settings_port_label"
+            android:textColor="#AAFFFFFF"
+            android:textSize="14sp" />
+
+        <!-- Port input -->
+        <EditText
+            android:id="@+id/et_port"
+            android:layout_width="160dp"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="32dp"
+            android:background="@drawable/input_background"
+            android:hint="5000"
+            android:inputType="number"
+            android:maxLength="5"
+            android:maxLines="1"
+            android:padding="16dp"
+            android:textColor="@android:color/white"
+            android:textColorHint="#66FFFFFF"
+            android:textSize="18sp" />
+
+        <!-- Helper text -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="32dp"
+            android:text="@string/settings_hint"
+            android:textColor="#66FFFFFF"
+            android:textSize="13sp" />
+
+        <!-- Buttons row -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/btn_save"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="16dp"
+                android:backgroundTint="@color/accent_color"
+                android:paddingHorizontal="32dp"
+                android:text="@string/settings_save"
+                android:textColor="@android:color/white" />
+
+            <Button
+                android:id="@+id/btn_cancel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:backgroundTint="#333333"
+                android:paddingHorizontal="32dp"
+                android:text="@string/settings_cancel"
+                android:textColor="@android:color/white" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</ScrollView>

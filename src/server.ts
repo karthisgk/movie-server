@@ -15,6 +15,7 @@ import { createVideoRouter } from './routes/videoRoutes.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { generateMovieId, generateMovieTitle } from './utils/slug.js';
 import { QUALITY_PROFILES } from './types/movie.js';
+import { extractSubtitles } from './services/subtitleService.js';
 import fs from 'fs/promises';
 import http from 'http';
 
@@ -255,6 +256,18 @@ async function bootstrap(): Promise<void> {
             transcodingProfile: undefined,
           });
           logger.info(`FFmpeg completed: ${movieId}`);
+
+          // Extract subtitle tracks after transcoding completes
+          extractSubtitles(
+            movieId,
+            filePath,
+            config.hlsDirectory,
+            config.ffmpegPath,
+            config.ffprobePath,
+          ).catch((err) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`Subtitle extraction failed for ${movieId}: ${msg}`);
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           logger.error(`FFmpeg failed: ${movieId} — ${msg}`);

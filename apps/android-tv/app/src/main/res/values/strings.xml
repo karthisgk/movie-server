@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NK TV</string>
+    <string name="player_title">Now Playing</string>
+    <string name="settings_title">Settings</string>
+
+    <!-- Browse categories -->
+    <string name="category_ready">Ready to Watch</string>
+    <string name="category_processing">Processing</string>
+    <string name="category_failed">Failed</string>
+    <string name="category_settings">Settings</string>
+
+    <!-- Settings screen -->
+    <string name="settings_host_label">Server Host (IP Address)</string>
+    <string name="settings_port_label">Server Port</string>
+    <string name="settings_hint">Enter the IP address and port of your Movie Server on the local network.\nExample: 192.168.0.10 / 5000</string>
+    <string name="settings_save">Save</string>
+    <string name="settings_cancel">Cancel</string>
+</resources>

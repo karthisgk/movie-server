@@ -5,6 +5,7 @@ import { Movie } from '../types/movie.js';
 import { isValidMovieId } from '../utils/slug.js';
 import { resolveAndVerifyPath } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
+import { listExtractedSubtitles } from '../services/subtitleService.js';
 
 /** Public-facing movie representation — no internal filesystem paths */
 function toPublicMovie(movie: Movie) {
@@ -40,7 +41,7 @@ function toPublicMovie(movie: Movie) {
   };
 }
 
-export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string): Router {
+export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string, ffmpegPath?: string, ffprobePath?: string): Router {
   const router = Router();
 
   // ─── GET /videos ───────────────────────────────────────────────────────────
@@ -150,6 +151,31 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string)
     }
   });
 
+  // ─── GET /videos/:id/subtitles ────────────────────────────────────────────────
+  router.get('/videos/:id/subtitles', async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    if (!id || !isValidMovieId(id)) {
+      res.status(400).json({ error: 'Invalid movie ID' });
+      return;
+    }
+
+    const movie = registry.get(id);
+    if (!movie) {
+      res.status(404).json({ error: 'Movie not found' });
+      return;
+    }
+
+    try {
+      const tracks = await listExtractedSubtitles(id, hlsDirectory);
+      res.json(tracks);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`Failed to list subtitles for ${id}: ${msg}`);
+      res.status(500).json({ error: 'Failed to list subtitles' });
+    }
+  });
+
   // ─── GET /hls/:id/* — Static HLS file serving ──────────────────────────────
   // Custom handler to:
   //   1. Validate the movie ID
@@ -185,6 +211,10 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string)
       res.setHeader('Content-Type', 'video/mp2t');
       // Segments: can be cached
       res.setHeader('Cache-Control', 'public, max-age=3600');
+    } else if (ext === '.vtt') {
+      res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+      // Subtitles: short cache
+      res.setHeader('Cache-Control', 'public, max-age=300');
     }
 
     res.sendFile(filePath, (err) => {
