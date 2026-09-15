@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/player_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@android:color/black">
@@ -19,6 +20,21 @@
         android:layout_gravity="center"
         android:indeterminate="true"
         android:indeterminateTint="@color/accent_color"
+        android:visibility="gone" />
+
+    <!-- Seek indicator badge overlay (shows current jump e.g. "+1m 30s") -->
+    <TextView
+        android:id="@+id/tv_seek_indicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="@drawable/seek_indicator_bg"
+        android:fontFamily="sans-serif-medium"
+        android:paddingHorizontal="24dp"
+        android:paddingVertical="14dp"
+        android:textColor="@android:color/white"
+        android:textSize="22sp"
+        android:textStyle="bold"
         android:visibility="gone" />
 
     <!-- Controls overlay — shown/hidden automatically -->
@@ -49,7 +65,7 @@
             android:id="@+id/seek_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingBottom="8dp"
+            android:paddingVertical="12dp"
             android:progressTint="@color/accent_color"
             android:thumbTint="@color/accent_color" />
 

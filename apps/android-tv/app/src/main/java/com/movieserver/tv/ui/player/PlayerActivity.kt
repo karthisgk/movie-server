@@ -60,6 +60,7 @@ class PlayerActivity : FragmentActivity() {
     private lateinit var repository: MovieRepository
 
     // Views
+    private lateinit var playerRoot: View
     private lateinit var playerView: PlayerView
     private lateinit var controlsOverlay: View
     private lateinit var tvTitle: TextView
@@ -72,6 +73,7 @@ class PlayerActivity : FragmentActivity() {
     private lateinit var btnAudio: ImageButton
     private lateinit var btnSubtitle: ImageButton
     private lateinit var progressBuffering: ProgressBar
+    private lateinit var tvSeekIndicator: TextView
 
     private val handler = Handler(Looper.getMainLooper())
     private val hideControlsRunnable = Runnable { hideControls() }
@@ -85,6 +87,14 @@ class PlayerActivity : FragmentActivity() {
     private var movieId: String = ""
     private var subtitleTracks: List<SubtitleTrack> = emptyList()
     private var seekBarTracking = false
+
+    // Seeking state for smart acceleration
+    private var lastSeekTimestamp = 0L
+    private var seekClickCount = 0
+    private val hideSeekIndicatorRunnable = Runnable {
+        tvSeekIndicator.visibility = View.GONE
+        seekClickCount = 0
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,25 +146,65 @@ class PlayerActivity : FragmentActivity() {
     }
 
     private fun bindViews() {
-        playerView       = findViewById(R.id.player_view)
-        controlsOverlay  = findViewById(R.id.controls_overlay)
-        tvTitle          = findViewById(R.id.tv_title)
-        tvCurrentTime    = findViewById(R.id.tv_current_time)
-        tvTotalTime      = findViewById(R.id.tv_total_time)
-        seekBar          = findViewById(R.id.seek_bar)
-        btnPlayPause     = findViewById(R.id.btn_play_pause)
-        btnRewind        = findViewById(R.id.btn_rewind)
-        btnForward       = findViewById(R.id.btn_forward)
-        btnAudio         = findViewById(R.id.btn_audio)
-        btnSubtitle      = findViewById(R.id.btn_subtitle)
+        playerRoot        = findViewById(R.id.player_root)
+        playerView        = findViewById(R.id.player_view)
+        controlsOverlay   = findViewById(R.id.controls_overlay)
+        tvTitle           = findViewById(R.id.tv_title)
+        tvCurrentTime     = findViewById(R.id.tv_current_time)
+        tvTotalTime       = findViewById(R.id.tv_total_time)
+        seekBar           = findViewById(R.id.seek_bar)
+        btnPlayPause      = findViewById(R.id.btn_play_pause)
+        btnRewind         = findViewById(R.id.btn_rewind)
+        btnForward        = findViewById(R.id.btn_forward)
+        btnAudio          = findViewById(R.id.btn_audio)
+        btnSubtitle       = findViewById(R.id.btn_subtitle)
         progressBuffering = findViewById(R.id.progress_buffering)
+        tvSeekIndicator   = findViewById(R.id.tv_seek_indicator)
 
-        // Hide default ExoPlayer controls — we use our own overlay
+        // Hide default ExoPlayer controls — we use our custom touch & D-pad overlay
         playerView.useController = false
 
-        btnPlayPause.setOnClickListener { viewModel.togglePlayPause(); scheduleHideControls() }
-        btnRewind.setOnClickListener   { viewModel.seekBackward(SEEK_AMOUNT_MS); scheduleHideControls() }
-        btnForward.setOnClickListener  { viewModel.seekForward(SEEK_AMOUNT_MS); scheduleHideControls() }
+        // Tap listener for mobile touch screens: tap video surface to toggle controls visibility
+        val toggleControlsListener = View.OnClickListener {
+            if (viewModel.state.value.showControls) {
+                hideControls()
+            } else {
+                showControls()
+            }
+        }
+        playerRoot.setOnClickListener(toggleControlsListener)
+        playerView.setOnClickListener(toggleControlsListener)
+        controlsOverlay.setOnClickListener { scheduleHideControls() }
+
+        btnPlayPause.setOnClickListener {
+            viewModel.togglePlayPause()
+            scheduleHideControls()
+        }
+
+        // Fast Forward & Rewind with Smart Acceleration on tap
+        btnRewind.setOnClickListener {
+            performAcceleratedSeek(forward = false)
+            scheduleHideControls()
+        }
+
+        btnForward.setOnClickListener {
+            performAcceleratedSeek(forward = true)
+            scheduleHideControls()
+        }
+
+        // Long-press Forward / Rewind: Immediate 5-minute jump
+        btnRewind.setOnLongClickListener {
+            performSeek(forward = false, stepMs = 300_000L)
+            scheduleHideControls()
+            true
+        }
+
+        btnForward.setOnLongClickListener {
+            performSeek(forward = true, stepMs = 300_000L)
+            scheduleHideControls()
+            true
+        }
+
         btnAudio.setOnClickListener    { showAudioTrackPicker() }
         btnSubtitle.setOnClickListener { showSubtitlePicker() }
     }
@@ -164,17 +214,83 @@ class PlayerActivity : FragmentActivity() {
             override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
                     val duration = viewModel.player?.duration ?: 0L
-                    tvCurrentTime.text = formatTime((progress / 100f * duration).toLong())
+                    val targetMs = (progress / 100f * duration).toLong()
+                    val formatted = formatTime(targetMs)
+                    tvCurrentTime.text = formatted
+                    tvSeekIndicator.text = "📍 $formatted"
+                    tvSeekIndicator.visibility = View.VISIBLE
+                    scheduleHideControls()
                 }
             }
-            override fun onStartTrackingTouch(sb: SeekBar) { seekBarTracking = true }
+
+            override fun onStartTrackingTouch(sb: SeekBar) {
+                seekBarTracking = true
+                scheduleHideControls()
+            }
+
             override fun onStopTrackingTouch(sb: SeekBar) {
                 seekBarTracking = false
                 val duration = viewModel.player?.duration ?: 0L
-                viewModel.player?.seekTo((sb.progress / 100f * duration).toLong())
+                val targetMs = (sb.progress / 100f * duration).toLong()
+                viewModel.player?.seekTo(targetMs)
                 scheduleHideControls()
+                handler.removeCallbacks(hideSeekIndicatorRunnable)
+                handler.postDelayed(hideSeekIndicatorRunnable, 1400L)
             }
         })
+    }
+
+    /**
+     * Smart accelerated seek: consecutive taps within 1.2s increase the seek step
+     * (10s → 30s → 1m → 5m → 10m) so users can quickly jump anywhere in a movie.
+     */
+    private fun performAcceleratedSeek(forward: Boolean) {
+        val now = System.currentTimeMillis()
+        if (now - lastSeekTimestamp < 1200L) {
+            seekClickCount++
+        } else {
+            seekClickCount = 1
+        }
+        lastSeekTimestamp = now
+
+        val stepMs = when {
+            seekClickCount <= 2  -> 10_000L     // 10s
+            seekClickCount <= 5  -> 30_000L     // 30s
+            seekClickCount <= 8  -> 60_000L     // 1m
+            seekClickCount <= 12 -> 300_000L    // 5m
+            else                 -> 600_000L    // 10m
+        }
+
+        performSeek(forward, stepMs)
+    }
+
+    private fun performSeek(forward: Boolean, stepMs: Long) {
+        if (forward) {
+            viewModel.seekForward(stepMs)
+        } else {
+            viewModel.seekBackward(stepMs)
+        }
+
+        val player = viewModel.player
+        val currentPosMs = player?.currentPosition ?: 0L
+        val formattedPos = formatTime(currentPosMs)
+        val sign = if (forward) "⏩ +" else "⏪ -"
+        val stepLabel = formatStep(stepMs)
+
+        tvSeekIndicator.text = "$sign$stepLabel ($formattedPos)"
+        tvSeekIndicator.visibility = View.VISIBLE
+
+        handler.removeCallbacks(hideSeekIndicatorRunnable)
+        handler.postDelayed(hideSeekIndicatorRunnable, 1400L)
+    }
+
+    private fun formatStep(ms: Long): String {
+        val secs = ms / 1000
+        return if (secs >= 60) {
+            "${secs / 60}m"
+        } else {
+            "${secs}s"
+        }
     }
 
     private fun loadHlsStream(player: ExoPlayer) {
@@ -251,22 +367,42 @@ class PlayerActivity : FragmentActivity() {
     // ─── D-pad key handling ──────────────────────────────────────────────────
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        // Prevent repeated triggers when holding key down
+        if (event?.repeatCount != 0) {
+            return super.onKeyDown(keyCode, event)
+        }
+
+        val controlsWereShowing = viewModel.state.value.showControls
         showControls()
+
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER,
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                viewModel.togglePlayPause()
-                true
+                if (!controlsWereShowing) {
+                    viewModel.togglePlayPause()
+                    true
+                } else {
+                    val focused = currentFocus
+                    if (focused == null || focused == playerRoot || focused == playerView || focused == controlsOverlay || focused == btnPlayPause) {
+                        viewModel.togglePlayPause()
+                        scheduleHideControls()
+                        true
+                    } else {
+                        // Focused on another button (e.g., btnRewind, btnForward, btnAudio), let standard click handle it
+                        super.onKeyDown(keyCode, event)
+                    }
+                }
             }
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
-                viewModel.seekForward(SEEK_AMOUNT_MS)
+                performAcceleratedSeek(forward = true)
                 true
             }
             KeyEvent.KEYCODE_DPAD_LEFT,
             KeyEvent.KEYCODE_MEDIA_REWIND -> {
-                viewModel.seekBackward(SEEK_AMOUNT_MS)
+                performAcceleratedSeek(forward = false)
                 true
             }
             KeyEvent.KEYCODE_DPAD_UP -> {
