@@ -366,35 +366,58 @@ class PlayerActivity : FragmentActivity() {
 
     // ─── D-pad key handling ──────────────────────────────────────────────────
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val keyCode = event.keyCode
+        val action = event.action
+
+        // Check if key is OK / Enter / Media Play-Pause
+        val isOkKey = keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                keyCode == KeyEvent.KEYCODE_ENTER ||
+                keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER ||
+                keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+
+        if (isOkKey) {
+            val focused = currentFocus
+            val isSpecificOtherButtonFocused = focused != null &&
+                    focused != playerRoot &&
+                    focused != playerView &&
+                    focused != controlsOverlay &&
+                    focused != btnPlayPause
+
+            if (action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) {
+                    val controlsWereShowing = viewModel.state.value.showControls
+                    showControls()
+
+                    if (!controlsWereShowing || !isSpecificOtherButtonFocused) {
+                        viewModel.togglePlayPause()
+                        scheduleHideControls()
+                        return true
+                    }
+                }
+            } else if (action == KeyEvent.ACTION_UP) {
+                if (!isSpecificOtherButtonFocused) {
+                    // Consume key up to prevent performClick() double-toggle
+                    return true
+                }
+            }
+        }
+
+        // Auto-show controls on D-pad navigation key presses
+        if (action == KeyEvent.ACTION_DOWN) {
+            showControls()
+        }
+
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         // Prevent repeated triggers when holding key down
         if (event?.repeatCount != 0) {
             return super.onKeyDown(keyCode, event)
         }
 
-        val controlsWereShowing = viewModel.state.value.showControls
-        showControls()
-
         return when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_CENTER,
-            KeyEvent.KEYCODE_ENTER,
-            KeyEvent.KEYCODE_NUMPAD_ENTER,
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
-                if (!controlsWereShowing) {
-                    viewModel.togglePlayPause()
-                    true
-                } else {
-                    val focused = currentFocus
-                    if (focused == null || focused == playerRoot || focused == playerView || focused == controlsOverlay || focused == btnPlayPause) {
-                        viewModel.togglePlayPause()
-                        scheduleHideControls()
-                        true
-                    } else {
-                        // Focused on another button (e.g., btnRewind, btnForward, btnAudio), let standard click handle it
-                        super.onKeyDown(keyCode, event)
-                    }
-                }
-            }
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
                 performAcceleratedSeek(forward = true)
