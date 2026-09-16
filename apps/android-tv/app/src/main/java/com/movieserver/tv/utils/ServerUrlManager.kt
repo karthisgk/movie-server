@@ -5,13 +5,18 @@ import android.content.SharedPreferences
 import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Manages the server configuration and saved server list in SharedPreferences.
+ * Manages the server configuration and saved server list in SharedPreferences
+ * and synchronizes the default-server.list.json file.
  */
 class ServerUrlManager(context: Context) {
+
+    private val contextRef = context.applicationContext
 
     companion object {
         private const val PREFS_NAME = "movie_server_prefs"
@@ -19,6 +24,7 @@ class ServerUrlManager(context: Context) {
         private const val KEY_HOST = "server_host"
         private const val KEY_PORT = "server_port"
         private const val KEY_SAVED_SERVERS = "saved_servers"
+        const val FILE_DEFAULT_SERVER_LIST = "default-server.list.json"
 
         const val DEFAULT_HOST = "192.168.0.10"
         const val DEFAULT_PORT = 5000
@@ -72,6 +78,11 @@ class ServerUrlManager(context: Context) {
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    init {
+        // Ensure default-server.list.json is created and synced on startup
+        syncDefaultServersFile(getSavedServers())
+    }
+
     var host: String
         get() = prefs.getString(KEY_HOST, DEFAULT_HOST) ?: DEFAULT_HOST
         set(value) = prefs.edit().putString(KEY_HOST, value.trim()).apply()
@@ -102,13 +113,14 @@ class ServerUrlManager(context: Context) {
 
     /** Get list of saved servers */
     fun getSavedServers(): List<String> {
+        val fileServers = readDefaultServersFromFile() ?: DEFAULT_SAVED_SERVERS
         val rawSet = prefs.getStringSet(KEY_SAVED_SERVERS, null)
         if (rawSet == null) {
-            saveSavedServers(DEFAULT_SAVED_SERVERS)
-            return DEFAULT_SAVED_SERVERS
+            saveSavedServers(fileServers)
+            return fileServers
         }
         val list = rawSet.map { normalizeUrl(it) }.toMutableList()
-        DEFAULT_SAVED_SERVERS.forEach { defaultServer ->
+        fileServers.forEach { defaultServer ->
             if (!list.contains(defaultServer)) {
                 list.add(defaultServer)
             }
@@ -149,6 +161,45 @@ class ServerUrlManager(context: Context) {
 
     private fun saveSavedServers(servers: List<String>) {
         prefs.edit().putStringSet(KEY_SAVED_SERVERS, servers.toSet()).apply()
+        syncDefaultServersFile(servers)
+    }
+
+    /**
+     * Creates and synchronizes the default-server.list.json file in local app storage.
+     */
+    fun syncDefaultServersFile(servers: List<String> = getSavedServers()): File {
+        val targetFile = File(contextRef.filesDir, FILE_DEFAULT_SERVER_LIST)
+        try {
+            val jsonArray = JSONArray()
+            servers.forEach { jsonArray.put(it) }
+            val formattedJson = jsonArray.toString(2)
+            targetFile.writeText(formattedJson)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return targetFile
+    }
+
+    /** Reads default servers from default-server.list.json file or asset if available */
+    fun readDefaultServersFromFile(): List<String>? {
+        try {
+            val targetFile = File(contextRef.filesDir, FILE_DEFAULT_SERVER_LIST)
+            val jsonContent = if (targetFile.exists()) {
+                targetFile.readText()
+            } else {
+                contextRef.assets.open(FILE_DEFAULT_SERVER_LIST).bufferedReader().use { it.readText() }
+            }
+            val jsonArray = JSONArray(jsonContent)
+            val list = mutableListOf<String>()
+            for (i in 0 until jsonArray.length()) {
+                val item = jsonArray.getString(i)
+                if (isValidServerUrl(item)) {
+                    list.add(normalizeUrl(item))
+                }
+            }
+            if (list.isNotEmpty()) return list
+        } catch (_: Exception) {}
+        return null
     }
 
     /** Returns the full URL for a relative path returned by the server API */
@@ -157,3 +208,4 @@ class ServerUrlManager(context: Context) {
         return "${baseUrl.trimEnd('/')}${cleaned}"
     }
 }
+
