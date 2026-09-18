@@ -231,7 +231,6 @@ async function bootstrap(): Promise<void> {
                 transcodingProgress: percent,
                 transcodingProfile: profileName,
               });
-              logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
             },
             onProfileComplete: (_profile, completedSoFar) => {
               const names = completedSoFar.map((p) => p.name);
@@ -249,54 +248,39 @@ async function bootstrap(): Promise<void> {
           const valid = await validateHlsOutput(movieId, config.hlsDirectory);
           if (!valid) throw new Error('HLS output validation failed');
 
-          registry.update(movieId, {
-            status: 'ready',
-            error: undefined,
-            transcodingProgress: undefined,
-            transcodingProfile: undefined,
-          });
-          logger.info(`FFmpeg completed: ${movieId}`);
+          // Check if all requested profiles are done
+          const updatedMovie = registry.get(movieId);
+          const doneNames = new Set(updatedMovie?.completedProfiles ?? []);
+          const allDone = allProfiles.every((p) => doneNames.has(p.name));
 
-          // Extract subtitle tracks after transcoding completes
-          extractSubtitles(
-            movieId,
-            filePath,
-            config.hlsDirectory,
-            config.ffmpegPath,
-            config.ffprobePath,
-          ).catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(`Subtitle extraction failed for ${movieId}: ${msg}`);
-          });
+          if (allDone) {
+            registry.update(movieId, { status: 'ready' });
+            logger.info(`Transcoding complete: ${movieId}`);
+          } else {
+            logger.info(`Transcoding partially complete: ${movieId} — available: ${Array.from(doneNames).join(', ')}`);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          logger.error(`FFmpeg failed: ${movieId} — ${msg}`);
-          registry.update(movieId, {
-            status: 'failed',
-            error: 'Transcoding failed',
-            transcodingProgress: undefined,
-            transcodingProfile: undefined,
-          });
+          logger.error(`Transcoding failed for ${movieId}: ${msg}`);
+          registry.update(movieId, { status: 'failed', error: msg });
         }
       });
     }
   }
 
-  // Scan HLS directory to register source-less movies
-  // (movies whose source was removed/moved but whose HLS output was preserved)
+  // Step 6b: Scan HLS directory for pre-existing outputs whose source file was removed
   try {
-    const hlsEntries = await fs.readdir(config.hlsDirectory, { withFileTypes: true });
-    for (const entry of hlsEntries) {
+    const entries = await fs.readdir(config.hlsDirectory, { withFileTypes: true });
+    for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      if (entry.name.startsWith('.tmp-')) continue;
-      if (registry.has(entry.name)) continue; // already registered from source scan
+      if (registry.has(entry.name)) continue;
 
-      // Read rich metadata written at transcode time
       const metadata = await readHlsMetadata(entry.name, config.hlsDirectory);
-      if (!metadata) continue; // legacy HLS without metadata.json — skip
 
-      const valid = await validateHlsOutput(entry.name, config.hlsDirectory);
-      if (!valid) continue; // broken HLS — skip
+      if (!metadata) {
+        logger.warn(`Orphaned HLS dir found without valid metadata.json: ${entry.name}`);
+        continue;
+      }
 
       const filename = metadata.filename ?? path.basename(metadata.sourcePath);
       const now = new Date().toISOString();
@@ -304,7 +288,7 @@ async function bootstrap(): Promise<void> {
         id: entry.name,
         title: metadata.title ?? generateMovieTitle(filename),
         filename,
-        sourcePath: '', // source is not present
+        sourcePath: '',
         extension: path.extname(filename).toLowerCase(),
         sizeBytes: metadata.sourceSizeBytes,
         status: 'ready',
@@ -336,9 +320,24 @@ async function bootstrap(): Promise<void> {
   // Disable X-Powered-By header
   app.disable('x-powered-by');
 
+  // Serve static web app assets from apps/web/dist
+  const webDistPath = path.join(process.cwd(), 'apps', 'web', 'dist');
+  app.use(express.static(webDistPath));
+
   // Routes
   app.use('/', createHealthRouter(registry, queue));
   app.use('/', createVideoRouter(registry, config.hlsDirectory));
+
+  // SPA Fallback for single-page app navigation
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/videos') || req.path.startsWith('/hls') || req.path.startsWith('/health')) {
+      next();
+      return;
+    }
+    res.sendFile(path.join(webDistPath, 'index.html'), (err) => {
+      if (err) next();
+    });
+  });
 
   // 404 + error handlers (must be last)
   app.use(notFoundHandler);

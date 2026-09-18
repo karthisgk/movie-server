@@ -202,16 +202,20 @@ export async function detectCompletedProfiles(
   return completed;
 }
 
+import { Worker } from 'worker_threads';
+import { TranscodeWorkerData, WorkerToMainMessage, MainToWorkerMessage } from './transcodeWorker.js';
+
 /**
- * Transcodes a movie to HLS using FFmpeg.
+ * Transcodes a movie to HLS using FFmpeg concurrently in Worker Threads per resolution.
  *
  * Process:
  *   1. Sort profiles descending (1080p → 720p → 480p) — best quality first
  *   2. Skip profiles already completed (crash-recovery via alreadyCompleted)
- *   3. Write each profile directly to <hlsDirectory>/<movieId>/<profileName>/
- *   4. After each profile: update master.m3u8 with all completed variants so far
+ *   3. Launch Node Worker Threads in parallel for each remaining quality profile
+ *   4. Calculate overall progress % out of 100 across all profiles
+ *   5. When any worker completes a profile: update master.m3u8 immediately
  *      → movie becomes playable as soon as the first profile finishes
- *   5. Write metadata.json when all profiles are done
+ *   6. Write metadata.json when all profiles are done
  */
 export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   const {
@@ -243,55 +247,167 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   // Track all completed profiles (pre-existing + newly done), sorted highest first
   const completedProfiles: QualityProfile[] = [...alreadyCompleted].sort((a, b) => b.height - a.height);
 
-  const totalToTranscode = toTranscode.length;
+  const totalProfilesCount = sortedProfiles.length;
+  if (totalProfilesCount === 0) {
+    return;
+  }
+
+  // Track progress (0–100) per profile for accurate combined 0–100% progress
+  const profileProgressMap: Record<string, number> = {};
+  for (const p of sortedProfiles) {
+    profileProgressMap[p.name] = alreadyDoneNames.has(p.name) ? 100 : 0;
+  }
+
+  const updateOverallProgress = () => {
+    if (!onProgress) return;
+    const sumProgress = sortedProfiles.reduce((acc, p) => acc + (profileProgressMap[p.name] ?? 0), 0);
+    const overallPercent = Math.min(100, Math.round(sumProgress / totalProfilesCount));
+
+    const activeProfiles = toTranscode
+      .filter((p) => (profileProgressMap[p.name] ?? 0) < 100)
+      .map((p) => p.name);
+    const currentProfileName = activeProfiles.join('+') || sortedProfiles[0].name;
+
+    onProgress(overallPercent, currentProfileName);
+  };
+
+  // Initial progress update
+  updateOverallProgress();
+
+  if (toTranscode.length === 0) {
+    await writeMasterPlaylist(finalDir, completedProfiles);
+    if (onProgress) {
+      onProgress(100, sortedProfiles[0].name);
+    }
+    return;
+  }
+
+  // Determine worker thread module path
+  const isTs = path.extname(import.meta.url) === '.ts';
+  const workerExt = isTs ? '.ts' : '.js';
+  const workerUrl = new URL(`./transcodeWorker${workerExt}`, import.meta.url);
+
+  const activeWorkers: Worker[] = [];
+
+  const handleAbort = () => {
+    for (const worker of activeWorkers) {
+      const msg: MainToWorkerMessage = { type: 'cancel' };
+      try {
+        worker.postMessage(msg);
+        worker.terminate().catch(() => {});
+      } catch {
+        // worker may already be terminated
+      }
+    }
+  };
+
+  if (signal) {
+    signal.addEventListener('abort', handleAbort, { once: true });
+  }
 
   try {
-    for (let i = 0; i < toTranscode.length; i++) {
-      const profile = toTranscode[i];
-      if (signal?.aborted) throw new Error('Transcoding cancelled');
-
+    const workerPromises = toTranscode.map(async (profile) => {
       const profileDir = path.join(finalDir, profile.name);
       await ensureDir(profileDir);
 
-      // Each remaining profile gets an equal share of the overall 0–100% range.
-      const profileStart = (i / totalToTranscode) * 100;
-      const profileEnd = ((i + 1) / totalToTranscode) * 100;
-
-      await transcodeProfile(
+      const workerData: TranscodeWorkerData = {
         inputPath,
-        profileDir,
+        outputDir: profileDir,
         profile,
         segmentDuration,
         ffmpegPath,
-        sourceInfo.durationSeconds,
-        signal,
-        onProgress
-          ? (innerPercent: number) => {
-              const overall = Math.round(
-                profileStart + (innerPercent / 100) * (profileEnd - profileStart),
-              );
-              onProgress(overall, profile.name);
+        durationSeconds: sourceInfo.durationSeconds,
+      };
+
+      return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) {
+          reject(new Error('Transcoding cancelled before start'));
+          return;
+        }
+
+        const worker = new Worker(workerUrl, {
+          workerData,
+          execArgv: process.execArgv,
+        });
+        activeWorkers.push(worker);
+
+        let isDone = false;
+
+        const cleanup = () => {
+          const index = activeWorkers.indexOf(worker);
+          if (index !== -1) {
+            activeWorkers.splice(index, 1);
+          }
+          try {
+            worker.terminate().catch(() => {});
+          } catch {
+            // ignore if already terminated
+          }
+        };
+
+        worker.on('message', async (msg: WorkerToMainMessage) => {
+          if (msg.type === 'progress') {
+            profileProgressMap[profile.name] = msg.percent;
+            updateOverallProgress();
+          } else if (msg.type === 'complete') {
+            profileProgressMap[profile.name] = 100;
+            updateOverallProgress();
+
+            logger.info(`Worker thread completed ${profile.name} for ${movieId}`);
+
+            if (!completedProfiles.some((p) => p.name === profile.name)) {
+              completedProfiles.push(profile);
+              completedProfiles.sort((a, b) => b.height - a.height);
+              await writeMasterPlaylist(finalDir, completedProfiles);
+              logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
+
+              if (onProfileComplete) {
+                onProfileComplete(profile, [...completedProfiles]);
+              }
             }
-          : undefined,
-      );
-      logger.info(`FFmpeg completed ${profile.name} for ${movieId}`);
 
-      // Mark this profile as done and update master.m3u8 immediately
-      // so the movie is playable as soon as any profile finishes.
-      completedProfiles.push(profile);
-      completedProfiles.sort((a, b) => b.height - a.height); // keep sorted
-      await writeMasterPlaylist(finalDir, completedProfiles);
-      logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
+            if (!isDone) {
+              isDone = true;
+              cleanup();
+              resolve();
+            }
+          } else if (msg.type === 'error') {
+            if (!isDone) {
+              isDone = true;
+              cleanup();
+              reject(new Error(msg.error));
+            }
+          }
+        });
 
-      // Notify orchestrator so it can flip status to 'partial' / update registry
-      if (onProfileComplete) {
-        onProfileComplete(profile, [...completedProfiles]);
-      }
-    }
+        worker.on('error', (err) => {
+          if (!isDone) {
+            isDone = true;
+            cleanup();
+            reject(new Error(`Worker thread error for ${profile.name}: ${err.message}`));
+          }
+        });
 
-    // Signal 100% when all profiles are done
-    if (onProgress && totalToTranscode > 0) {
-      onProgress(100, toTranscode[toTranscode.length - 1].name);
+        worker.on('exit', (code) => {
+          if (!isDone) {
+            isDone = true;
+            cleanup();
+            if (code === 0) {
+              resolve();
+            } else if (!signal?.aborted) {
+              reject(new Error(`Worker thread for ${profile.name} exited with code ${code}`));
+            } else {
+              reject(new Error('Transcoding was cancelled'));
+            }
+          }
+        });
+      });
+    });
+
+    await Promise.all(workerPromises);
+
+    if (onProgress) {
+      onProgress(100, sortedProfiles[0].name);
     }
 
     // Write metadata.json for stale detection and source-less registry recovery
@@ -314,127 +430,14 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
 
     logger.info(`HLS output ready: ${finalDir}`);
   } catch (err) {
-    // Do NOT delete the output directory on failure — partial output is kept
-    // so crash-recovery can resume from the completed profiles on next start.
+    handleAbort();
     logger.warn(`Transcoding interrupted for ${movieId} — partial output preserved for recovery`);
     throw err;
-  }
-}
-
-function transcodeProfile(
-  inputPath: string,
-  outputDir: string,
-  profile: QualityProfile,
-  segmentDuration: number,
-  ffmpegPath: string,
-  durationSeconds: number,
-  signal?: AbortSignal,
-  onProgress?: (percent: number) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('Transcoding cancelled before start'));
-      return;
-    }
-
-    const playlistPath = path.join(outputDir, 'playlist.m3u8');
-    const segmentPattern = path.join(outputDir, 'segment_%03d.ts');
-
-    // Build scale filter that preserves aspect ratio and ensures even dimensions
-    // force_original_aspect_ratio=decrease: never stretches, letterboxes if needed
-    // pad + ceil ensures H.264 even-dimension requirements
-    const scaleFilter =
-      `scale=${profile.width}:${profile.height}:` +
-      `force_original_aspect_ratio=decrease,` +
-      `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,` +
-      `format=yuv420p`;
-
-    const args = [
-      '-i', inputPath,
-      '-map', '0:v:0',
-      '-map', '0:a:0?',
-      '-c:v', 'libx264',
-      '-preset', 'veryfast',
-      '-crf', '23',
-      '-maxrate', profile.videoBitrate,
-      '-bufsize', `${parseInt(profile.videoBitrate) * 2}k`,
-      '-vf', scaleFilter,
-      '-c:a', 'aac',
-      '-b:a', profile.audioBitrate,
-      '-ac', '2',
-      '-f', 'hls',
-      '-hls_time', String(segmentDuration),
-      '-hls_list_size', '0',
-      '-hls_segment_type', 'mpegts',
-      '-hls_segment_filename', segmentPattern,
-      '-hls_flags', 'independent_segments',
-      '-progress', 'pipe:2',  // Write progress to stderr in key=value format
-      '-nostats',
-      playlistPath,
-    ];
-
-    logger.info(`FFmpeg starting ${profile.name} for ${path.basename(inputPath)}`);
-
-    const proc = spawn(ffmpegPath, args, { stdio: 'pipe' });
-
-    let stderrOutput = '';
-    let stderrBuffer = '';
-
-    // Parse FFmpeg progress lines from stderr.
-    // FFmpeg with -progress pipe:2 writes key=value pairs; we look for out_time_us
-    // and fall back to the human-readable "time=HH:MM:SS.xx" pattern.
-    proc.stderr.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderrOutput += text;
-      stderrBuffer += text;
-
-      // Process complete lines
-      const lines = stderrBuffer.split('\n');
-      stderrBuffer = lines.pop() ?? ''; // keep incomplete last line
-
-      for (const line of lines) {
-        // -progress pipe:2 emits: out_time_us=<microseconds>
-        const usMatch = line.match(/^out_time_us=(\d+)/);
-        if (usMatch && durationSeconds > 0 && onProgress) {
-          const elapsedSec = parseInt(usMatch[1], 10) / 1_000_000;
-          const pct = Math.min(99, Math.round((elapsedSec / durationSeconds) * 100));
-          onProgress(pct);
-          continue;
-        }
-
-        // Fallback: human-readable "time=HH:MM:SS.xx" from regular FFmpeg output
-        const timeMatch = line.match(/time=(\d+):(\d+):(\d+\.\d+)/);
-        if (timeMatch && durationSeconds > 0 && onProgress) {
-          const elapsed =
-            parseInt(timeMatch[1], 10) * 3600 +
-            parseInt(timeMatch[2], 10) * 60 +
-            parseFloat(timeMatch[3]);
-          const pct = Math.min(99, Math.round((elapsed / durationSeconds) * 100));
-          onProgress(pct);
-        }
-      }
-    });
-
+  } finally {
     if (signal) {
-      signal.addEventListener('abort', () => {
-        proc.kill('SIGTERM');
-        reject(new Error('Transcoding was cancelled'));
-      }, { once: true });
+      signal.removeEventListener('abort', handleAbort);
     }
-
-    proc.on('error', (err) => {
-      reject(new Error(`FFmpeg process error: ${err.message}`));
-    });
-
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        const lastLines = stderrOutput.split('\n').slice(-20).join('\n');
-        reject(new Error(`FFmpeg exited with code ${code}.\n${lastLines}`));
-      }
-    });
-  });
+  }
 }
 
 async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]): Promise<void> {

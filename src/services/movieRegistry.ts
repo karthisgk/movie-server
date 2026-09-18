@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import { Movie } from '../types/movie.js';
 import { logger } from '../utils/logger.js';
 
@@ -5,12 +6,14 @@ import { logger } from '../utils/logger.js';
  * In-memory registry of all discovered movies.
  * The filesystem is the source of truth — this is rebuilt on every restart.
  */
-export class MovieRegistry {
+export class MovieRegistry extends EventEmitter {
   private movies = new Map<string, Movie>();
 
   add(movie: Movie): void {
     this.movies.set(movie.id, movie);
     logger.info(`Registry: added movie "${movie.filename}" (${movie.id})`);
+    this.emit('change', this.getAll());
+    this.emit('add', movie);
   }
 
   update(id: string, updates: Partial<Movie>): Movie | null {
@@ -24,6 +27,8 @@ export class MovieRegistry {
       updatedAt: new Date().toISOString(),
     };
     this.movies.set(id, updated);
+    this.emit('change', this.getAll());
+    this.emit('update', updated);
     return updated;
   }
 
@@ -33,6 +38,8 @@ export class MovieRegistry {
       const movie = this.movies.get(id);
       this.movies.delete(id);
       logger.info(`Registry: removed movie "${movie?.filename}" (${id})`);
+      this.emit('change', this.getAll());
+      this.emit('remove', id);
     }
     return existed;
   }

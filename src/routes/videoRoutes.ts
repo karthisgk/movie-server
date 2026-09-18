@@ -50,6 +50,38 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
     res.json(movies);
   });
 
+  // ─── GET /videos/events (Server-Sent Events Stream) ───────────────────────
+  router.get('/videos/events', (req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders();
+    }
+
+    // Push initial movie list snapshot to new client
+    const initialMovies = registry.getAll().map(toPublicMovie);
+    res.write(`event: init\ndata: ${JSON.stringify(initialMovies)}\n\n`);
+
+    // Broadcast update whenever movie registry changes or progress advances
+    const handleChange = () => {
+      const updatedMovies = registry.getAll().map(toPublicMovie);
+      res.write(`event: update\ndata: ${JSON.stringify(updatedMovies)}\n\n`);
+    };
+
+    registry.on('change', handleChange);
+
+    // 15s heartbeat to keep connection alive
+    const heartbeat = setInterval(() => {
+      res.write(': ping\n\n');
+    }, 15000);
+
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      registry.off('change', handleChange);
+    });
+  });
+
   // ─── GET /videos/:id ───────────────────────────────────────────────────────
   router.get('/videos/:id', (req: Request, res: Response) => {
     const { id } = req.params;

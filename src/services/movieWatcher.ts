@@ -391,7 +391,6 @@ export class MovieWatcher {
               transcodingProgress: percent,
               transcodingProfile: profileName,
             });
-            logger.info(`Transcoding ${movieId} [${profileName}]: ${percent}%`);
           },
           onProfileComplete: (_profile, completedSoFar) => {
             const names = completedSoFar.map((p) => p.name);
