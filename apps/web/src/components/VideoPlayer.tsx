@@ -40,7 +40,13 @@ interface QualityLevel {
   name: string;
 }
 
-type MenuView = 'none' | 'root' | 'speed' | 'quality' | 'subs';
+interface AudioTrackOption {
+  id: number;
+  name: string;
+  lang?: string;
+}
+
+type MenuView = 'none' | 'root' | 'speed' | 'quality' | 'subs' | 'audio';
 
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2];
 const CONTROLS_HIDE_MS = 3200;
@@ -172,6 +178,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
   const [subs, setSubs] = useState<SubtitleTrack[]>([]);
   const [subIndex, setSubIndex] = useState(-1);
 
+  const [audioTracks, setAudioTracks] = useState<AudioTrackOption[]>([]);
+  const [audioTrackIndex, setAudioTrackIndex] = useState(-1);
+
+  const [seekFeedback, setSeekFeedback] = useState<{ type: 'forward' | 'rewind'; id: number } | null>(null);
+
   const [showControls, setShowControls] = useState(true);
   const [menu, setMenu] = useState<MenuView>('none');
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -259,6 +270,24 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
 
       hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
         setActiveLevel(data.level);
+      });
+
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (_event, data) => {
+        const tracks = data.audioTracks || [];
+        if (tracks.length > 0) {
+          setAudioTracks(
+            tracks.map((t, index) => ({
+              id: t.id ?? index,
+              name: t.name || t.lang || `Track ${index + 1}`,
+              lang: t.lang,
+            })),
+          );
+          setAudioTrackIndex(hls.audioTrack);
+        }
+      });
+
+      hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => {
+        setAudioTrackIndex(data.id);
       });
 
       hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -475,6 +504,10 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
       const video = videoRef.current;
       if (!video) return;
       seekTo(video.currentTime + delta);
+      setSeekFeedback({
+        type: delta > 0 ? 'forward' : 'rewind',
+        id: Date.now(),
+      });
       poke();
     },
     [seekTo, poke],
@@ -528,6 +561,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
 
   const changeSubtitle = useCallback((value: number) => {
     setSubIndex(value);
+  }, []);
+
+  const changeAudioTrack = useCallback((value: number) => {
+    setAudioTrackIndex(value);
+    if (hlsRef.current) hlsRef.current.audioTrack = value;
   }, []);
 
   const handleClose = useCallback(() => {
@@ -683,6 +721,19 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
 
       {/* Resume toast */}
       {resumeNotice && <div className="player-toast">{resumeNotice}</div>}
+
+      {/* Seek feedback animation */}
+      {seekFeedback && (
+        <div
+          key={seekFeedback.id}
+          className={`player-seek-feedback ${
+            seekFeedback.type === 'forward' ? 'is-forward' : 'is-rewind'
+          }`}
+        >
+          {seekFeedback.type === 'forward' ? <SkipForward size={32} /> : <SkipBack size={32} />}
+          <span>{seekFeedback.type === 'forward' ? '+10s' : '-10s'}</span>
+        </div>
+      )}
 
       {/* Error overlay */}
       {error && (
@@ -863,6 +914,13 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
                 onClick={() => setMenu('speed')}
               />
               <MenuRow label="Quality" value={qualityLabel} onClick={() => setMenu('quality')} />
+              {audioTracks.length > 1 && (
+                <MenuRow
+                  label="Audio"
+                  value={audioTracks.find((t) => t.id === audioTrackIndex)?.name ?? 'Default'}
+                  onClick={() => setMenu('audio')}
+                />
+              )}
               {subs.length > 0 && (
                 <MenuRow
                   label="Subtitles"
@@ -919,6 +977,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
                   label={track.label}
                   active={subIndex === index}
                   onClick={() => changeSubtitle(index)}
+                />
+              ))}
+            </>
+          )}
+
+          {menu === 'audio' && (
+            <>
+              <div className="settings-title">Audio Track</div>
+              {audioTracks.map((track) => (
+                <MenuRow
+                  key={track.id}
+                  label={track.name}
+                  active={audioTrackIndex === track.id}
+                  onClick={() => changeAudioTrack(track.id)}
                 />
               ))}
             </>
