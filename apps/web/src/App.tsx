@@ -1,301 +1,292 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Loader2, Play, Cpu } from 'lucide-react';
 import { Navbar } from './components/Navbar';
+import { HeroBillboard } from './components/HeroBillboard';
+import { MovieRow } from './components/MovieRow';
 import { MovieCard } from './components/MovieCard';
+import { MovieDetailModal } from './components/MovieDetailModal';
 import { TranscodingQueueDrawer } from './components/TranscodingQueueDrawer';
-import { VideoPlayerModal } from './components/VideoPlayerModal';
+import { VideoPlayer } from './components/VideoPlayer';
 import { PublicMovie } from './types';
-import { Search, Film, Cpu, CheckCircle2, Clock, Sparkles } from 'lucide-react';
+import { useAllProgress } from './hooks/useAllProgress';
+import { progressRatio } from './lib/format';
 
 export const App: React.FC = () => {
   const [movies, setMovies] = useState<PublicMovie[]>([]);
+  const [loading, setLoading] = useState(true);
   const [isQueueOpen, setIsQueueOpen] = useState(false);
-  const [selectedMovie, setSelectedMovie] = useState<PublicMovie | null>(null);
-  const [activeFilter, setActiveFilter] = useState<'all' | 'processing' | 'ready' | 'queued'>('all');
+  const [playerId, setPlayerId] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const progress = useAllProgress();
 
   const fetchMovies = useCallback(async () => {
     try {
       setIsRefreshing(true);
       const res = await fetch('/videos');
-      if (res.ok) {
-        const data = (await res.json()) as PublicMovie[];
-        setMovies(data);
-      }
+      if (res.ok) setMovies((await res.json()) as PublicMovie[]);
     } catch (err) {
       console.error('Failed to fetch movies:', err);
     } finally {
       setIsRefreshing(false);
+      setLoading(false);
     }
   }, []);
 
-  // Connect to Server-Sent Events (/videos/events) for zero-latency live push updates
+  // Live library updates via Server-Sent Events.
   useEffect(() => {
-    fetchMovies();
+    void fetchMovies();
 
     const eventSource = new EventSource('/videos/events');
-
-    eventSource.addEventListener('init', (e) => {
+    const apply = (raw: string) => {
       try {
-        const data = JSON.parse(e.data) as PublicMovie[];
-        setMovies(data);
+        setMovies(JSON.parse(raw) as PublicMovie[]);
+        setLoading(false);
       } catch (err) {
-        console.error('Failed to parse SSE init:', err);
+        console.error('Failed to parse movie event:', err);
       }
-    });
+    };
 
-    eventSource.addEventListener('update', (e) => {
-      try {
-        const data = JSON.parse(e.data) as PublicMovie[];
-        setMovies(data);
-      } catch (err) {
-        console.error('Failed to parse SSE update:', err);
-      }
-    });
-
+    eventSource.addEventListener('init', (e) => apply((e as MessageEvent).data));
+    eventSource.addEventListener('update', (e) => apply((e as MessageEvent).data));
     eventSource.onerror = () => {
-      // EventSource auto-reconnects natively when connection is lost
+      /* EventSource reconnects automatically. */
     };
 
-    return () => {
-      eventSource.close();
-    };
+    return () => eventSource.close();
   }, [fetchMovies]);
 
-  // Active processing movie
-  const activeMovie = movies.find(
-    (m) => m.status === 'processing' || (m.status === 'partial' && (m.transcodingProgress ?? 0) < 100)
+  const playable = useMemo(
+    () => movies.filter((m) => m.status === 'ready' || m.status === 'partial'),
+    [movies],
   );
 
-  const queuedMovies = movies.filter((m) => m.status === 'queued');
-  const readyMovies = movies.filter((m) => m.status === 'ready' || m.status === 'partial');
+  const queuedMovies = useMemo(() => movies.filter((m) => m.status === 'queued'), [movies]);
+  const queueOrder = useMemo(() => queuedMovies.map((m) => m.id), [queuedMovies]);
 
-  // Filter & Search logic
-  const filteredMovies = movies.filter((m) => {
-    const matchesSearch = m.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      m.filename.toLowerCase().includes(searchQuery.toLowerCase());
+  const continueWatching = useMemo(
+    () =>
+      playable
+        .filter((m) => {
+          const entry = progress[m.id];
+          if (!entry) return false;
+          const ratio = progressRatio(entry.time, entry.duration);
+          return ratio > 0.02 && ratio < 0.98;
+        })
+        .sort((a, b) => (progress[b.id]?.updatedAt ?? 0) - (progress[a.id]?.updatedAt ?? 0)),
+    [playable, progress],
+  );
 
-    if (!matchesSearch) return false;
+  const recentlyAdded = useMemo(
+    () =>
+      [...movies].sort(
+        (a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0),
+      ),
+    [movies],
+  );
 
-    if (activeFilter === 'processing') return m.status === 'processing' || m.status === 'partial';
-    if (activeFilter === 'ready') return m.status === 'ready' || m.status === 'partial';
-    if (activeFilter === 'queued') return m.status === 'queued';
-    return true;
-  });
+  const inProgress = useMemo(
+    () =>
+      movies.filter(
+        (m) => m.status === 'processing' || (m.status === 'partial' && (m.transcodingProgress ?? 0) < 100),
+      ),
+    [movies],
+  );
+
+  const failedMovies = useMemo(() => movies.filter((m) => m.status === 'failed'), [movies]);
+
+  const activeTranscode = inProgress[0];
+
+  const featured = useMemo(
+    () => continueWatching[0] ?? playable[0] ?? movies[0] ?? null,
+    [continueWatching, playable, movies],
+  );
+
+  const searchResults = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return null;
+    return movies.filter(
+      (m) =>
+        m.title.toLowerCase().includes(query) || m.filename.toLowerCase().includes(query),
+    );
+  }, [movies, searchQuery]);
+
+  const playerMovie = playerId ? movies.find((m) => m.id === playerId) ?? null : null;
+  const detailMovie = detailId ? movies.find((m) => m.id === detailId) ?? null : null;
+
+  useEffect(() => {
+    if (playerId && !movies.some((m) => m.id === playerId)) setPlayerId(null);
+  }, [movies, playerId]);
+
+  const openPlayer = useCallback((movie: PublicMovie) => {
+    setDetailId(null);
+    setPlayerId(movie.id);
+  }, []);
+
+  const openDetail = useCallback((movie: PublicMovie) => setDetailId(movie.id), []);
 
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', paddingBottom: '60px' }}>
-      
-      {/* Navigation Bar */}
+    <div className="app-shell">
       <Navbar
         movies={movies}
         onOpenQueue={() => setIsQueueOpen(true)}
         onRefresh={fetchMovies}
         isRefreshing={isRefreshing}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
 
-      {/* Main Content Area */}
-      <main style={{ maxWidth: '1440px', margin: '0 auto', width: '100%', padding: '24px' }}>
-        
-        {/* Active Transcoding Spotlight Banner if a movie is actively transcoding */}
-        {activeMovie && (
-          <div className="glass-card" style={{
-            margin: '0 0 32px 0',
-            padding: '28px',
-            background: 'linear-gradient(135deg, rgba(0, 242, 254, 0.08) 0%, rgba(157, 78, 221, 0.08) 100%)',
-            border: '1px solid rgba(0, 242, 254, 0.3)',
-            position: 'relative',
-            overflow: 'hidden',
-          }}>
-            <div style={{ position: 'relative', zIndex: 2 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                <span className="badge badge-processing">
-                  <Cpu size={14} className="spin" /> Multi-Thread Worker Transcoding
-                </span>
-                <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 600 }}>
-                  Interstellar / Active Stream Processing
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', flexWrap: 'wrap', gap: '16px' }}>
-                <div>
-                  <h2 style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '4px' }}>
-                    {activeMovie.title}
-                  </h2>
-                  <p style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                    Transcoding parallel resolutions ({activeMovie.transcodingProfile || '720p + 1080p'})
-                  </p>
-                </div>
-
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 900, color: 'var(--accent-cyan)', lineHeight: 1 }}>
-                    {activeMovie.transcodingProgress ?? 0}%
-                  </div>
-                  <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    Combined Worker Progress out of 100%
-                  </span>
-                </div>
-              </div>
-
-              {/* Progress bar */}
-              <div style={{ width: '100%', height: 10, background: 'rgba(255,255,255,0.08)', borderRadius: 5, overflow: 'hidden', marginTop: '18px' }}>
-                <div
-                  className="progress-active-bar"
-                  style={{
-                    width: `${activeMovie.transcodingProgress ?? 0}%`,
-                    height: '100%',
-                    borderRadius: 5,
-                    transition: 'width 0.4s ease',
-                  }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                <span>Completed Variants: {(activeMovie.completedProfiles ?? []).join(', ') || 'None so far'}</span>
-                <span>Queued Next: {queuedMovies.length} movie(s)</span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Filter & Search Header */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', marginBottom: '24px', flexWrap: 'wrap' }}>
-          
-          {/* Filter Tabs */}
-          <div style={{ display: 'flex', gap: '8px', background: 'rgba(255,255,255,0.03)', padding: '4px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-glass)' }}>
-            <button
-              onClick={() => setActiveFilter('all')}
-              style={{
-                padding: '8px 16px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: activeFilter === 'all' ? 'rgba(255,255,255,0.1)' : 'transparent',
-                color: activeFilter === 'all' ? 'var(--text-primary)' : 'var(--text-secondary)',
-                fontWeight: activeFilter === 'all' ? 700 : 500,
-                fontSize: '0.85rem',
-                cursor: 'pointer',
-              }}
-            >
-              All ({movies.length})
-            </button>
-            <button
-              onClick={() => setActiveFilter('ready')}
-              style={{
-                padding: '8px 16px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: activeFilter === 'ready' ? 'rgba(48, 209, 88, 0.15)' : 'transparent',
-                color: activeFilter === 'ready' ? 'var(--accent-emerald)' : 'var(--text-secondary)',
-                fontWeight: activeFilter === 'ready' ? 700 : 500,
-                fontSize: '0.85rem',
-                cursor: 'pointer',
-              }}
-            >
-              Playable ({readyMovies.length})
-            </button>
-            <button
-              onClick={() => setActiveFilter('processing')}
-              style={{
-                padding: '8px 16px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: activeFilter === 'processing' ? 'rgba(0, 242, 254, 0.15)' : 'transparent',
-                color: activeFilter === 'processing' ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-                fontWeight: activeFilter === 'processing' ? 700 : 500,
-                fontSize: '0.85rem',
-                cursor: 'pointer',
-              }}
-            >
-              Transcoding ({activeMovie ? 1 : 0})
-            </button>
-            <button
-              onClick={() => setActiveFilter('queued')}
-              style={{
-                padding: '8px 16px',
-                borderRadius: 'var(--radius-sm)',
-                border: 'none',
-                background: activeFilter === 'queued' ? 'rgba(255, 159, 10, 0.15)' : 'transparent',
-                color: activeFilter === 'queued' ? 'var(--accent-amber)' : 'var(--text-secondary)',
-                fontWeight: activeFilter === 'queued' ? 700 : 500,
-                fontSize: '0.85rem',
-                cursor: 'pointer',
-              }}
-            >
-              Queued ({queuedMovies.length})
-            </button>
-          </div>
-
-          {/* Search Box */}
-          <div style={{ position: 'relative', width: '280px' }}>
-            <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)' }} />
-            <input
-              type="text"
-              placeholder="Search movie library..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '10px 12px 10px 36px',
-                background: 'rgba(255, 255, 255, 0.05)',
-                border: '1px solid var(--border-glass)',
-                borderRadius: 'var(--radius-md)',
-                color: 'var(--text-primary)',
-                fontSize: '0.85rem',
-                outline: 'none',
-              }}
-            />
-          </div>
-
+      {loading && movies.length === 0 ? (
+        <div className="app-loading">
+          <Loader2 size={40} className="spin" />
+          <p>Loading your library…</p>
         </div>
-
-        {/* Movies Grid */}
-        {filteredMovies.length > 0 ? (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-            gap: '24px',
-          }}>
-            {filteredMovies.map((movie) => {
-              const qIndex = queuedMovies.findIndex((q) => q.id === movie.id);
-              return (
-                <MovieCard
-                  key={movie.id}
-                  movie={movie}
-                  queuePosition={qIndex !== -1 ? qIndex + 1 : undefined}
-                  onPlay={(m) => setSelectedMovie(m)}
+      ) : (
+        <main className="app-main">
+          {searchResults ? (
+            <section className="search-results">
+              <h2 className="row-title">
+                {searchResults.length > 0
+                  ? `Results for “${searchQuery.trim()}”`
+                  : `No results for “${searchQuery.trim()}”`}
+              </h2>
+              {searchResults.length > 0 && (
+                <div className="search-grid">
+                  {searchResults.map((movie) => (
+                    <MovieCard
+                      key={movie.id}
+                      movie={movie}
+                      progress={progress[movie.id]}
+                      queuePosition={queueOrder.indexOf(movie.id) >= 0 ? queueOrder.indexOf(movie.id) + 1 : undefined}
+                      onPlay={openPlayer}
+                      onInfo={openDetail}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          ) : movies.length === 0 ? (
+            <div className="app-empty">
+              <Play size={42} />
+              <h2>Your library is empty</h2>
+              <p>
+                Drop movie files into the server&apos;s <code>MOVIE_DIRECTORY</code>. They will appear
+                here automatically once discovered and transcoded.
+              </p>
+            </div>
+          ) : (
+            <>
+              {featured && (
+                <HeroBillboard
+                  movie={featured}
+                  progress={progress[featured.id]}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
                 />
-              );
-            })}
-          </div>
-        ) : (
-          <div style={{ padding: '60px', textAlign: 'center', background: 'rgba(255,255,255,0.02)', borderRadius: 'var(--radius-lg)', border: '1px dashed var(--border-glass)' }}>
-            <Film size={48} color="var(--text-muted)" style={{ marginBottom: '16px' }} />
-            <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
-              No movies found
-            </h3>
-            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-              No movies match your current search or filter criteria.
-            </p>
-          </div>
-        )}
+              )}
 
-      </main>
+              {activeTranscode && (
+                <button
+                  type="button"
+                  className="transcode-strip"
+                  onClick={() => setIsQueueOpen(true)}
+                >
+                  <Cpu size={18} className="spin" />
+                  <span className="transcode-strip-title">
+                    Now transcoding <strong>{activeTranscode.title}</strong>
+                  </span>
+                  <span className="transcode-strip-bar">
+                    <span style={{ width: `${activeTranscode.transcodingProgress ?? 0}%` }} />
+                  </span>
+                  <span className="transcode-strip-pct">
+                    {activeTranscode.transcodingProgress ?? 0}%
+                  </span>
+                </button>
+              )}
 
-      {/* Transcoding Queue Drawer Modal */}
+              <div id="library" className="rows">
+                <MovieRow
+                  title="Continue Watching"
+                  movies={continueWatching}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+                <MovieRow
+                  title="Available Now"
+                  movies={playable}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+                <MovieRow
+                  title="Recently Added"
+                  movies={recentlyAdded}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+                <MovieRow
+                  title="Currently Processing"
+                  movies={inProgress}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+                <MovieRow
+                  title="Queued"
+                  movies={queuedMovies}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+                <MovieRow
+                  title="Needs Attention"
+                  movies={failedMovies}
+                  progress={progress}
+                  queueOrder={queueOrder}
+                  onPlay={openPlayer}
+                  onInfo={openDetail}
+                />
+              </div>
+            </>
+          )}
+        </main>
+      )}
+
+      <footer className="app-footer">
+        CineStream — local home network streaming. No accounts, no cloud.
+      </footer>
+
       <TranscodingQueueDrawer
         isOpen={isQueueOpen}
         onClose={() => setIsQueueOpen(false)}
         movies={movies}
       />
 
-      {/* HLS Video Player Modal */}
-      {selectedMovie && (
-        <VideoPlayerModal
-          movie={selectedMovie}
-          onClose={() => setSelectedMovie(null)}
+      {detailMovie && (
+        <MovieDetailModal
+          movie={detailMovie}
+          progress={progress[detailMovie.id]}
+          onClose={() => setDetailId(null)}
+          onPlay={openPlayer}
         />
       )}
 
+      {playerMovie && (
+        <VideoPlayer
+          key={playerMovie.id}
+          movie={playerMovie}
+          onClose={() => setPlayerId(null)}
+        />
+      )}
     </div>
   );
 };

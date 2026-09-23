@@ -1,5 +1,5 @@
-import React from 'react';
-import { Film, Activity, ListOrdered, RefreshCw, Cpu } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Film, RefreshCw, Search, Server, X } from 'lucide-react';
 import { PublicMovie } from '../types';
 
 interface NavbarProps {
@@ -7,6 +7,8 @@ interface NavbarProps {
   onOpenQueue: () => void;
   onRefresh: () => void;
   isRefreshing: boolean;
+  searchQuery: string;
+  onSearchChange: (value: string) => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -14,139 +16,97 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenQueue,
   onRefresh,
   isRefreshing,
+  searchQuery,
+  onSearchChange,
 }) => {
-  const activeMovie = movies.find(
-    (m) => m.status === 'processing' || (m.status === 'partial' && (m.transcodingProgress ?? 0) < 100)
-  );
+  const [scrolled, setScrolled] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
 
-  const queuedCount = movies.filter((m) => m.status === 'queued').length;
-  const totalTranscoding = (activeMovie ? 1 : 0) + queuedCount;
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 30);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
+
+  const processingCount = movies.filter(
+    (m) => m.status === 'processing' || m.status === 'partial' || m.status === 'queued',
+  ).length;
+
+  const handleSearchBlur = () => {
+    if (searchQuery.trim() === '') setSearchOpen(false);
+  };
 
   return (
-    <header className="glass-panel" style={{ position: 'sticky', top: 0, zIndex: 50, margin: '16px 24px 0 24px', padding: '14px 24px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        
-        {/* Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{
-            background: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',
-            padding: '10px',
-            borderRadius: '12px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            boxShadow: '0 0 15px rgba(0, 242, 254, 0.4)',
-          }}>
-            <Film size={24} color="#0a0d14" />
-          </div>
-          <div>
-            <h1 style={{ fontSize: '1.25rem', fontWeight: 800, letterSpacing: '-0.02em', background: 'linear-gradient(90deg, #ffffff, #94a3b8)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-              CineStream
-            </h1>
-            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--accent-emerald)', display: 'inline-block' }}></span>
-              Home LAN Server
-            </span>
-          </div>
-        </div>
+    <header className={`navbar ${scrolled ? 'is-scrolled' : ''}`}>
+      <div className="navbar-inner">
+        <button
+          type="button"
+          className="navbar-logo"
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+        >
+          <span className="navbar-logo-mark">
+            <Film size={22} />
+          </span>
+          <span className="navbar-logo-text">CineStream</span>
+        </button>
 
-        {/* Center: Live Active Transcode Worker Status */}
-        {activeMovie && (
-          <div
-            onClick={onOpenQueue}
-            style={{
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '12px',
-              padding: '8px 16px',
-              background: 'rgba(0, 242, 254, 0.08)',
-              border: '1px solid rgba(0, 242, 254, 0.3)',
-              borderRadius: 'var(--radius-full)',
-              transition: 'all 0.2s ease',
-            }}
-            className="pulse-glow"
-          >
-            <Cpu size={16} className="spin" color="var(--accent-cyan)" />
-            <div style={{ fontSize: '0.85rem' }}>
-              <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                {activeMovie.title}
-              </span>
-              <span style={{ margin: '0 8px', color: 'rgba(255,255,255,0.3)' }}>|</span>
-              <span style={{ fontWeight: 700, color: 'var(--accent-cyan)' }}>
-                {activeMovie.transcodingProgress ?? 0}%
-              </span>
-              {activeMovie.transcodingProfile && (
-                <span style={{ marginLeft: 6, fontSize: '0.75rem', padding: '2px 6px', background: 'rgba(0,0,0,0.4)', borderRadius: 4, color: 'var(--text-secondary)' }}>
-                  {activeMovie.transcodingProfile}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Right Action Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          
-          {/* Queue Button */}
+        <nav className="navbar-links">
+          <button type="button" className="navbar-link is-active" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
+            Home
+          </button>
           <button
-            onClick={onOpenQueue}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '8px 16px',
-              background: totalTranscoding > 0 ? 'rgba(255, 159, 10, 0.12)' : 'rgba(255, 255, 255, 0.05)',
-              border: totalTranscoding > 0 ? '1px solid rgba(255, 159, 10, 0.3)' : '1px solid var(--border-glass)',
-              borderRadius: 'var(--radius-md)',
-              color: totalTranscoding > 0 ? 'var(--accent-amber)' : 'var(--text-primary)',
-              cursor: 'pointer',
-              fontWeight: 600,
-              fontSize: '0.85rem',
-              transition: 'all 0.2s ease',
-            }}
+            type="button"
+            className="navbar-link"
+            onClick={() =>
+              document.getElementById('library')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
           >
-            <ListOrdered size={16} />
-            <span>Transcode Queue</span>
-            {totalTranscoding > 0 && (
-              <span style={{
-                background: 'var(--accent-amber)',
-                color: '#000',
-                fontSize: '0.75rem',
-                fontWeight: 800,
-                borderRadius: '50%',
-                width: 18,
-                height: 18,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}>
-                {totalTranscoding}
-              </span>
+            Library
+          </button>
+          <button type="button" className="navbar-link" onClick={onOpenQueue}>
+            Processing
+            {processingCount > 0 && <span className="navbar-link-count">{processingCount}</span>}
+          </button>
+        </nav>
+
+        <div className="navbar-actions">
+          <div className={`navbar-search ${searchOpen ? 'is-open' : ''}`}>
+            <Search size={18} />
+            <input
+              type="text"
+              placeholder="Search titles"
+              value={searchQuery}
+              onChange={(e) => onSearchChange(e.target.value)}
+              onFocus={() => setSearchOpen(true)}
+              onBlur={handleSearchBlur}
+              aria-label="Search titles"
+            />
+            {searchQuery && (
+              <button type="button" onClick={() => onSearchChange('')} aria-label="Clear search">
+                <X size={16} />
+              </button>
             )}
-          </button>
+          </div>
 
-          {/* Refresh Button */}
           <button
+            type="button"
+            className="navbar-icon-btn"
             onClick={onRefresh}
-            title="Refresh movie library"
-            style={{
-              padding: '8px',
-              background: 'rgba(255, 255, 255, 0.05)',
-              border: '1px solid var(--border-glass)',
-              borderRadius: 'var(--radius-md)',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
+            aria-label="Refresh library"
+            title="Refresh library"
           >
-            <RefreshCw size={16} className={isRefreshing ? 'spin' : ''} />
+            <RefreshCw size={18} className={isRefreshing ? 'spin' : ''} />
           </button>
 
-        </div>
+          <span className="navbar-health" title="Home LAN server online">
+            <Server size={16} />
+          </span>
 
+          <span className="navbar-avatar" aria-hidden>
+            C
+          </span>
+        </div>
       </div>
     </header>
   );

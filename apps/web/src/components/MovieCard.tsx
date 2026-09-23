@@ -1,187 +1,117 @@
 import React from 'react';
-import { Play, Clock, AlertTriangle, CheckCircle2, Cpu, Film } from 'lucide-react';
-import { PublicMovie } from '../types';
+import { Info, Play, RotateCcw } from 'lucide-react';
+import { PublicMovie, WatchProgress } from '../types';
+import {
+  cleanTitle,
+  extractYear,
+  formatClock,
+  metaLine,
+  posterGradient,
+  progressRatio,
+} from '../lib/format';
 
 interface MovieCardProps {
   movie: PublicMovie;
+  progress?: WatchProgress;
   queuePosition?: number;
   onPlay: (movie: PublicMovie) => void;
+  onInfo: (movie: PublicMovie) => void;
 }
 
-export const MovieCard: React.FC<MovieCardProps> = ({ movie, queuePosition, onPlay }) => {
-  const formatDuration = (seconds?: number) => {
-    if (!seconds) return 'Duration unknown';
-    const hrs = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    return hrs > 0 ? `${hrs}h ${mins}m` : `${mins}m`;
-  };
+export const MovieCard: React.FC<MovieCardProps> = ({
+  movie,
+  progress,
+  queuePosition,
+  onPlay,
+  onInfo,
+}) => {
+  const playable = movie.status === 'ready' || movie.status === 'partial';
+  const year = extractYear(movie.title);
+  const ratio = progress ? progressRatio(progress.time, progress.duration) : 0;
+  const hasProgress = playable && ratio > 0 && ratio < 1;
 
-  const formatSize = (bytes: number) => {
-    const gb = bytes / (1024 * 1024 * 1024);
-    return `${gb.toFixed(1)} GB`;
-  };
-
-  const isPlayable = movie.status === 'ready' || movie.status === 'partial';
-  const isTranscoding = movie.status === 'processing' || (movie.status === 'partial' && (movie.transcodingProgress ?? 0) < 100);
+  const statusLabel = (() => {
+    switch (movie.status) {
+      case 'ready':
+        return { text: 'Ready', className: 'tag-ready' };
+      case 'partial':
+        return { text: `Transcoding ${movie.transcodingProgress ?? 0}%`, className: 'tag-processing' };
+      case 'processing':
+        return { text: movie.transcodingProgress ? `${movie.transcodingProgress}%` : 'Processing', className: 'tag-processing' };
+      case 'queued':
+        return { text: queuePosition ? `Queue #${queuePosition}` : 'Queued', className: 'tag-queued' };
+      case 'failed':
+        return { text: 'Failed', className: 'tag-failed' };
+      default:
+        return { text: 'Discovered', className: 'tag-neutral' };
+    }
+  })();
 
   return (
-    <div className="glass-card" style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden', height: '100%', position: 'relative' }}>
-      
-      {/* Poster Art / Abstract Banner */}
-      <div style={{
-        height: '180px',
-        background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.95))',
-        position: 'relative',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        borderBottom: '1px solid var(--border-glass)'
-      }}>
-        {/* Abstract pattern / icon */}
-        <Film size={48} color="rgba(255, 255, 255, 0.08)" />
+    <div className="movie-card">
+      <button
+        type="button"
+        className="movie-card-poster"
+        style={{ background: posterGradient(movie.id) }}
+        onClick={() => (playable ? onPlay(movie) : onInfo(movie))}
+        aria-label={`${cleanTitle(movie.title)}`}
+      >
+        <span className="movie-card-initial">{cleanTitle(movie.title).charAt(0)}</span>
 
-        {/* Top Badges */}
-        <div style={{ position: 'absolute', top: 12, left: 12, right: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          
-          {/* Status Badge */}
-          {movie.status === 'ready' && (
-            <span className="badge badge-ready">
-              <CheckCircle2 size={12} /> Ready
-            </span>
-          )}
+        <span className={`movie-tag ${statusLabel.className}`}>{statusLabel.text}</span>
 
-          {movie.status === 'partial' && (
-            <span className="badge badge-partial">
-              <Play size={12} /> Playable (Partial)
-            </span>
-          )}
-
-          {movie.status === 'processing' && (
-            <span className="badge badge-processing">
-              <Cpu size={12} className="spin" /> Transcoding
-            </span>
-          )}
-
-          {movie.status === 'queued' && (
-            <span className="badge badge-queued">
-              <Clock size={12} /> {queuePosition ? `Queue #${queuePosition}` : 'Queued'}
-            </span>
-          )}
-
-          {movie.status === 'failed' && (
-            <span className="badge badge-failed">
-              <AlertTriangle size={12} /> Transcode Failed
-            </span>
-          )}
-
-          {/* Quality profiles badge */}
-          <div style={{ display: 'flex', gap: 4 }}>
-            {(movie.completedProfiles ?? []).map((p) => (
-              <span key={p} style={{ fontSize: '0.65rem', padding: '2px 6px', borderRadius: 4, background: 'rgba(0, 242, 254, 0.15)', color: 'var(--accent-cyan)', fontWeight: 700 }}>
-                {p}
-              </span>
+        {movie.completedProfiles && movie.completedProfiles.length > 0 && (
+          <span className="movie-card-profiles">
+            {movie.completedProfiles.map((profile) => (
+              <span key={profile}>{profile}</span>
             ))}
-          </div>
+          </span>
+        )}
 
+        <span className="movie-card-hover">
+          <span className="movie-card-title">{cleanTitle(movie.title)}</span>
+          <span className="movie-card-meta">{metaLine(movie)}</span>
+          <span className="movie-card-actions">
+            <span className="movie-card-play">
+              {hasProgress ? <RotateCcw size={16} /> : <Play size={16} fill="currentColor" />}
+              {hasProgress ? 'Resume' : playable ? 'Play' : 'Details'}
+            </span>
+            <span
+              role="button"
+              tabIndex={0}
+              className="movie-card-info"
+              onClick={(e) => {
+                e.stopPropagation();
+                onInfo(movie);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.stopPropagation();
+                  onInfo(movie);
+                }
+              }}
+            >
+              <Info size={16} />
+            </span>
+          </span>
+        </span>
+
+        {hasProgress && (
+          <span className="movie-card-progress">
+            <span style={{ width: `${ratio * 100}%` }} />
+          </span>
+        )}
+      </button>
+
+      <div className="movie-card-foot">
+        <div className="movie-card-foot-title">{cleanTitle(movie.title)}</div>
+        <div className="movie-card-foot-meta">
+          {year ? <span>{year}</span> : null}
+          <span>{movie.height ? `${movie.height}p` : 'HD'}</span>
+          {hasProgress && progress ? (
+            <span className="movie-card-remaining">{formatClock(progress.duration - progress.time)} left</span>
+          ) : null}
         </div>
-
-        {/* Overlay Play Button if Playable */}
-        {isPlayable && (
-          <button
-            onClick={() => onPlay(movie)}
-            style={{
-              position: 'absolute',
-              width: 56,
-              height: 56,
-              borderRadius: '50%',
-              background: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',
-              border: 'none',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              boxShadow: '0 0 25px rgba(0, 242, 254, 0.5)',
-              transition: 'transform 0.2s ease',
-            }}
-          >
-            <Play size={24} color="#0a0d14" style={{ marginLeft: 4 }} />
-          </button>
-        )}
-      </div>
-
-      {/* Card Content */}
-      <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
-        <div>
-          <h3 style={{ fontSize: '1.1rem', fontWeight: 700, marginBottom: '6px', color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={movie.title}>
-            {movie.title}
-          </h3>
-
-          <div style={{ display: 'flex', gap: '12px', fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-            <span>{formatDuration(movie.durationSeconds)}</span>
-            <span>•</span>
-            <span>{formatSize(movie.sizeBytes)}</span>
-            {movie.height && (
-              <>
-                <span>•</span>
-                <span>{movie.height}p Source</span>
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Active Transcoding Progress Bar (Multi-thread worker progress out of 100%) */}
-        {isTranscoding && (
-          <div style={{ marginTop: 'auto', paddingTop: '10px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', marginBottom: '6px' }}>
-              <span style={{ color: 'var(--accent-cyan)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
-                <Cpu size={12} className="spin" /> Workers: {movie.transcodingProfile || 'Multi-thread'}
-              </span>
-              <span style={{ color: 'var(--text-primary)', fontWeight: 700 }}>
-                {movie.transcodingProgress ?? 0}%
-              </span>
-            </div>
-
-            <div style={{ width: '100%', height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, overflow: 'hidden' }}>
-              <div
-                className="progress-active-bar"
-                style={{
-                  width: `${movie.transcodingProgress ?? 0}%`,
-                  height: '100%',
-                  borderRadius: 3,
-                  transition: 'width 0.3s ease',
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Action Button */}
-        {isPlayable && (
-          <button
-            onClick={() => onPlay(movie)}
-            style={{
-              marginTop: '14px',
-              width: '100%',
-              padding: '10px',
-              background: 'rgba(255, 255, 255, 0.08)',
-              border: '1px solid var(--border-glass)',
-              borderRadius: 'var(--radius-md)',
-              color: 'var(--text-primary)',
-              fontWeight: 600,
-              fontSize: '0.85rem',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              transition: 'all 0.2s ease',
-            }}
-          >
-            <Play size={16} color="var(--accent-cyan)" />
-            <span>{movie.status === 'partial' ? 'Stream Partial' : 'Watch Movie'}</span>
-          </button>
-        )}
-
       </div>
     </div>
   );
