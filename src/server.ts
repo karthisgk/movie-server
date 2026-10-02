@@ -98,6 +98,7 @@ async function bootstrap(): Promise<void> {
         height: mediaInfo.height,
         videoCodec: mediaInfo.videoCodec,
         audioCodec: mediaInfo.audioCodec,
+        audioTracks: mediaInfo.audioTracks && mediaInfo.audioTracks.length > 0 ? mediaInfo.audioTracks : undefined,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -220,6 +221,7 @@ async function bootstrap(): Promise<void> {
               audioCodec: mov.audioCodec ?? '',
               hasVideo: true,
               hasAudio: !!mov.audioCodec,
+              audioTracks: mov.audioTracks ?? [],
             },
             ffmpegPath: config.ffmpegPath,
             sourceSizeBytes: stats.size,
@@ -298,6 +300,7 @@ async function bootstrap(): Promise<void> {
         height: metadata.height,
         videoCodec: metadata.videoCodec,
         audioCodec: metadata.audioCodec,
+        audioTracks: metadata.audioTracks,
         createdAt: metadata.generatedAt,
         updatedAt: now,
       });
@@ -326,7 +329,7 @@ async function bootstrap(): Promise<void> {
 
   // Routes
   app.use('/', createHealthRouter(registry, queue));
-  app.use('/', createVideoRouter(registry, config.hlsDirectory));
+  app.use('/', createVideoRouter(registry, config.hlsDirectory, config.ffmpegPath, config.ffprobePath));
 
   // SPA Fallback for single-page app navigation
   app.get('*', (req, res, next) => {

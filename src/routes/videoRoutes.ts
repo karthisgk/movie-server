@@ -3,9 +3,12 @@ import path from 'path';
 import { MovieRegistry } from '../services/movieRegistry.js';
 import { Movie } from '../types/movie.js';
 import { isValidMovieId } from '../utils/slug.js';
-import { resolveAndVerifyPath } from '../utils/filesystem.js';
+import { resolveAndVerifyPath, fileExists } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { listExtractedSubtitles } from '../services/subtitleService.js';
+import { getMediaInfo } from '../services/ffmpegService.js';
+import { readHlsMetadata } from '../services/hlsService.js';
+import { ensureAudioTrackExtracted, generateMasterPlaylistContent } from '../services/audioExtractionService.js';
 
 /** Public-facing movie representation — no internal filesystem paths */
 function toPublicMovie(movie: Movie) {
@@ -23,6 +26,7 @@ function toPublicMovie(movie: Movie) {
     height: movie.height,
     videoCodec: movie.videoCodec,
     audioCodec: movie.audioCodec,
+    audioTracks: movie.audioTracks,
     createdAt: movie.createdAt,
     updatedAt: movie.updatedAt,
     playUrl: `/videos/${movie.id}/play`,
@@ -208,18 +212,105 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
     }
   });
 
-  // ─── GET /hls/:id/* — Static HLS file serving ──────────────────────────────
-  // Custom handler to:
-  //   1. Validate the movie ID
-  //   2. Verify the resolved path stays within hlsDirectory (path traversal protection)
-  //   3. Set correct MIME types for .m3u8 and .ts
-  router.get('/hls/:id/*', (req: Request, res: Response) => {
+  // ─── GET /videos/:id/audio-tracks ──────────────────────────────────────────
+  router.get('/videos/:id/audio-tracks', async (req: Request, res: Response) => {
+    const { id } = req.params;
+
+    if (!id || !isValidMovieId(id)) {
+      res.status(400).json({ error: 'Invalid movie ID' });
+      return;
+    }
+
+    const movie = registry.get(id);
+    if (!movie) {
+      res.status(404).json({ error: 'Movie not found' });
+      return;
+    }
+
+    if (movie.audioTracks && movie.audioTracks.length > 0) {
+      res.json(movie.audioTracks);
+      return;
+    }
+
+    // Try reading from HLS metadata.json if available
+    try {
+      const meta = await readHlsMetadata(id, hlsDirectory);
+      if (meta?.audioTracks && meta.audioTracks.length > 0) {
+        registry.update(id, { audioTracks: meta.audioTracks });
+        res.json(meta.audioTracks);
+        return;
+      }
+    } catch {}
+
+    // Try running ffprobe on the source file if available
+    if (movie.sourcePath && movie.sourceAvailable && ffprobePath) {
+      try {
+        const mediaInfo = await getMediaInfo(movie.sourcePath, ffprobePath);
+        if (mediaInfo.audioTracks && mediaInfo.audioTracks.length > 0) {
+          registry.update(id, {
+            audioTracks: mediaInfo.audioTracks,
+            audioCodec: movie.audioCodec || mediaInfo.audioCodec,
+          });
+          res.json(mediaInfo.audioTracks);
+          return;
+        }
+      } catch (err) {
+        logger.warn(`Failed on-demand ffprobe for ${id}: ${err}`);
+      }
+    }
+
+    // Fallback: return at least 1 track representation so UI can always display audio info
+    const fallbackTrack = [
+      {
+        streamIndex: 0,
+        language: 'und',
+        label: movie.audioCodec ? `Default (${movie.audioCodec.toUpperCase()})` : 'Default Audio',
+        codec: movie.audioCodec || 'aac',
+        channels: 2,
+      },
+    ];
+    res.json(fallbackTrack);
+  });
+
+  // ─── GET /hls/:id/* — Dynamic & Static HLS file serving ───────────────────
+  router.get('/hls/:id/*', async (req: Request, res: Response) => {
     const { id } = req.params;
     const rest = (req.params as Record<string, string>)['0'] ?? '';
 
     if (!id || !isValidMovieId(id)) {
       res.status(400).json({ error: 'Invalid movie ID' });
       return;
+    }
+
+    const movie = registry.get(id);
+
+    // 1. Intercept master.m3u8: if multi-audio is present, dynamically generate master playlist with audio groups
+    if (rest === 'master.m3u8') {
+      if (movie && movie.audioTracks && movie.audioTracks.length > 1) {
+        try {
+          const playlistContent = await generateMasterPlaylistContent(id, hlsDirectory, movie);
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+          res.setHeader('Cache-Control', 'no-cache, no-store');
+          res.send(playlistContent);
+          return;
+        } catch (err) {
+          logger.warn(`Failed to dynamically generate master playlist for ${id}, falling back to static file: ${err}`);
+        }
+      }
+    }
+
+    // 2. Intercept audio tracks: on-demand extraction for audio_<trackIndex>/*
+    if (rest.startsWith('audio_')) {
+      const match = rest.match(/^audio_(\d+)/);
+      const sourcePath = movie?.sourcePath;
+      if (match && sourcePath && ffmpegPath) {
+        const trackIndex = parseInt(match[1], 10);
+        try {
+          await ensureAudioTrackExtracted(id, sourcePath, trackIndex, hlsDirectory, ffmpegPath);
+        } catch (err) {
+          logger.error(`Error during on-demand audio extraction for ${id} track ${trackIndex}:`, err);
+        }
+      }
     }
 
     // Prevent path traversal
@@ -230,6 +321,15 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
       logger.warn(`Path traversal attempt blocked: id=${id}, rest=${rest}`);
       res.status(403).json({ error: 'Forbidden' });
       return;
+    }
+
+    // If an audio segment is still being written by FFmpeg, poll briefly for it
+    if (rest.startsWith('audio_') && !(await fileExists(filePath))) {
+      const start = Date.now();
+      while (Date.now() - start < 10000) {
+        if (await fileExists(filePath)) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
     }
 
     const ext = path.extname(filePath).toLowerCase();
