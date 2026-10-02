@@ -78,7 +78,7 @@ discovered → queued → processing → partial → ready
 
 FFmpeg is called with an argument array (never a shell string). Key flags:
 - `-map 0:v:0` — first video stream
-- `-map 0:a:0?` — first audio stream (optional, so silent files don't fail)
+- `-map 0:a?` — all audio streams (optional, so silent files don't fail)
 - `-c:v libx264 -preset veryfast -crf 23` — CPU encoding
 - `-vf scale=W:H:force_original_aspect_ratio=decrease,pad,...` — aspect-ratio-safe scaling
 - `-hls_segment_type mpegts` — MPEG-TS for VLC compatibility

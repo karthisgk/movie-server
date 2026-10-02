@@ -52,7 +52,7 @@ async function runWorker(): Promise<void> {
   const args = [
     '-i', inputPath,
     '-map', '0:v:0',
-    '-map', '0:a:0?',
+    '-map', '0:a?',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-crf', '23',
