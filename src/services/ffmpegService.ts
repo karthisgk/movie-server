@@ -321,7 +321,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   updateOverallProgress();
 
   if (toTranscode.length === 0) {
-    await writeMasterPlaylist(finalDir, completedProfiles);
+    await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
     if (onProgress) {
       onProgress(100, sortedProfiles[0].name);
     }
@@ -405,7 +405,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
             if (!completedProfiles.some((p) => p.name === profile.name)) {
               completedProfiles.push(profile);
               completedProfiles.sort((a, b) => b.height - a.height);
-              await writeMasterPlaylist(finalDir, completedProfiles);
+              await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
               logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
 
               if (onProfileComplete) {
@@ -488,7 +488,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   }
 }
 
-async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]): Promise<void> {
+async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[], audioTracks?: AudioTrackInfo[]): Promise<void> {
   const bandwidthMap: Record<string, number> = {
     '480p': 1400000,
     '720p': 2996000,
@@ -500,12 +500,34 @@ async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]
     '1080p': '1920x1080',
   };
 
+  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
+  const audioGroupId = 'audio-tracks';
+
   let content = '#EXTM3U\n#EXT-X-VERSION:3\n\n';
+
+  if (hasMultipleAudio) {
+    for (let i = 0; i < audioTracks.length; i++) {
+      const track = audioTracks[i];
+      const isDefault = i === 0 ? 'YES' : 'NO';
+      const name = track.label.replace(/"/g, "'");
+      const lang = track.language;
+
+      if (i === 0) {
+        // Default track (track 0) is embedded in the video segments — no separate URI needed
+        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault}\n`;
+      } else {
+        // Alternate audio tracks are stored at audio_i/playlist.m3u8 relative to master.m3u8
+        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="audio_${i}/playlist.m3u8"\n`;
+      }
+    }
+    content += '\n';
+  }
 
   for (const profile of profiles) {
     const bandwidth = bandwidthMap[profile.name] ?? 2000000;
     const resolution = resolutionMap[profile.name] ?? `${profile.width}x${profile.height}`;
-    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"\n`;
+    const audioAttr = hasMultipleAudio ? `,AUDIO="${audioGroupId}"` : '';
+    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"${audioAttr}\n`;
     content += `${profile.name}/playlist.m3u8\n\n`;
   }
 

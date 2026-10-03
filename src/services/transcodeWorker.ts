@@ -112,11 +112,11 @@ async function runWorker(): Promise<void> {
     `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,` +
     `format=yuv420p`;
 
-  // ── Transcode video + all audio tracks ──────────────────
+  // ── Step 1: Transcode video + default (first) audio track ──────────────────
   const args = [
     '-i', inputPath,
     '-map', '0:v:0',
-    '-map', '0:a?',
+    '-map', '0:a:0?',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-crf', '23',
@@ -138,6 +138,50 @@ async function runWorker(): Promise<void> {
   ];
 
   await runFfmpeg(args, ffmpegPath, durationSeconds, profile.name);
+
+  // ── Step 2: Extract alternate audio tracks (only once per movie) ───────────
+  // We extract audio tracks into <finalDir>/audio_<i designator>
+  const finalDir = path.dirname(outputDir);
+  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
+
+  if (hasMultipleAudio) {
+    for (let i = 1; i < audioTracks.length; i++) {
+      if (isCancelled) break;
+      const audioDir = path.join(finalDir, `audio_${i}`);
+      const audioPlaylistPath = path.join(audioDir, 'playlist.m3u8');
+
+      // If audio playlist already exists (e.g. created by another worker), skip
+      try {
+        await fs.access(audioPlaylistPath);
+        continue;
+      } catch {
+        // file doesn't exist — proceed to create
+      }
+
+      await fs.mkdir(audioDir, { recursive: true });
+      const audioSegmentPattern = path.join(audioDir, 'segment_%03d.ts');
+
+      const audioArgs = [
+        '-i', inputPath,
+        '-map', `0:a:${i}`,
+        '-vn',
+        '-c:a', 'aac',
+        '-b:a', profile.audioBitrate,
+        '-ac', '2',
+        '-f', 'hls',
+        '-hls_time', String(segmentDuration),
+        '-hls_list_size', '0',
+        '-hls_segment_type', 'mpegts',
+        '-hls_segment_filename', audioSegmentPattern,
+        '-hls_flags', 'independent_segments',
+        '-progress', 'pipe:2',
+        '-nostats',
+        audioPlaylistPath,
+      ];
+
+      await runFfmpeg(audioArgs, ffmpegPath, durationSeconds, profile.name);
+    }
+  }
 
   parentPort?.postMessage({ type: 'progress', profileName: profile.name, percent: 100 });
   parentPort?.postMessage({ type: 'complete', profileName: profile.name });
