@@ -112,11 +112,11 @@ async function runWorker(): Promise<void> {
     `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,` +
     `format=yuv420p`;
 
-  // ── Step 1: Transcode video + default (first) audio track ──────────────────
+  // ── Transcode video + all audio tracks ──────────────────
   const args = [
     '-i', inputPath,
     '-map', '0:v:0',
-    '-map', '0:a:0?',
+    '-map', '0:a?',
     '-c:v', 'libx264',
     '-preset', 'veryfast',
     '-crf', '23',
@@ -138,41 +138,6 @@ async function runWorker(): Promise<void> {
   ];
 
   await runFfmpeg(args, ffmpegPath, durationSeconds, profile.name);
-
-  // ── Step 2: Extract additional audio tracks as separate HLS audio playlists ─
-  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
-  if (hasMultipleAudio) {
-    for (let i = 1; i < audioTracks.length; i++) {
-      if (isCancelled) break;
-      const track = audioTracks[i];
-      const audioDir = path.join(outputDir, `audio_${i}`);
-      await fs.mkdir(audioDir, { recursive: true });
-
-      const audioPlaylistPath = path.join(audioDir, 'playlist.m3u8');
-      const audioSegmentPattern = path.join(audioDir, 'segment_%03d.ts');
-
-      const audioArgs = [
-        '-i', inputPath,
-        '-map', `0:a:${i}`,
-        '-vn',
-        '-c:a', 'aac',
-        '-b:a', profile.audioBitrate,
-        '-ac', '2',
-        '-f', 'hls',
-        '-hls_time', String(segmentDuration),
-        '-hls_list_size', '0',
-        '-hls_segment_type', 'mpegts',
-        '-hls_segment_filename', audioSegmentPattern,
-        '-hls_flags', 'independent_segments',
-        '-progress', 'pipe:2',
-        '-nostats',
-        audioPlaylistPath,
-      ];
-
-      // Don't report progress for audio-only tracks (it would confuse the main progress)
-      await runFfmpeg(audioArgs, ffmpegPath, durationSeconds, profile.name);
-    }
-  }
 
   parentPort?.postMessage({ type: 'progress', profileName: profile.name, percent: 100 });
   parentPort?.postMessage({ type: 'complete', profileName: profile.name });
