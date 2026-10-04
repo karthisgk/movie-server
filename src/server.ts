@@ -16,6 +16,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { generateMovieId, generateMovieTitle } from './utils/slug.js';
 import { QUALITY_PROFILES } from './types/movie.js';
 import { extractSubtitles } from './services/subtitleService.js';
+import { repairIncompleteAudioRenditions } from './services/audioExtractionService.js';
 import fs from 'fs/promises';
 import http from 'http';
 
@@ -98,6 +99,7 @@ async function bootstrap(): Promise<void> {
         height: mediaInfo.height,
         videoCodec: mediaInfo.videoCodec,
         audioCodec: mediaInfo.audioCodec,
+        audioTracks: mediaInfo.audioTracks && mediaInfo.audioTracks.length > 0 ? mediaInfo.audioTracks : undefined,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -114,6 +116,7 @@ async function bootstrap(): Promise<void> {
         transcode480p: config.transcode480p,
         transcode720p: config.transcode720p,
         transcode1080p: config.transcode1080p,
+        transcode2160p: config.transcode2160p,
       },
       QUALITY_PROFILES,
     ).map((p) => p.name);
@@ -177,6 +180,7 @@ async function bootstrap(): Promise<void> {
             transcode480p: config.transcode480p,
             transcode720p: config.transcode720p,
             transcode1080p: config.transcode1080p,
+            transcode2160p: config.transcode2160p,
           },
           QUALITY_PROFILES,
         );
@@ -220,6 +224,7 @@ async function bootstrap(): Promise<void> {
               audioCodec: mov.audioCodec ?? '',
               hasVideo: true,
               hasAudio: !!mov.audioCodec,
+              audioTracks: mov.audioTracks ?? [],
             },
             ffmpegPath: config.ffmpegPath,
             sourceSizeBytes: stats.size,
@@ -298,6 +303,7 @@ async function bootstrap(): Promise<void> {
         height: metadata.height,
         videoCodec: metadata.videoCodec,
         audioCodec: metadata.audioCodec,
+        audioTracks: metadata.audioTracks,
         createdAt: metadata.generatedAt,
         updatedAt: now,
       });
@@ -306,6 +312,16 @@ async function bootstrap(): Promise<void> {
   } catch {
     // HLS directory may have just been created — nothing to scan
   }
+
+  // Step 6c: Repair audio renditions left truncated by an interrupted extraction.
+  // Runs in the background so startup is not blocked; affected movies become
+  // fully seekable once their audio is rebuilt.
+  void repairIncompleteAudioRenditions(
+    registry.getAll(),
+    config.hlsDirectory,
+    config.ffmpegPath,
+    config.hlsSegmentDuration,
+  ).catch((err) => logger.warn(`Audio repair pass failed: ${err}`));
 
   // Step 7: Start file watcher
   const watcher = new MovieWatcher(registry, queue, config);
@@ -326,7 +342,7 @@ async function bootstrap(): Promise<void> {
 
   // Routes
   app.use('/', createHealthRouter(registry, queue));
-  app.use('/', createVideoRouter(registry, config.hlsDirectory));
+  app.use('/', createVideoRouter(registry, config.hlsDirectory, config.ffmpegPath, config.ffprobePath));
 
   // SPA Fallback for single-page app navigation
   app.get('*', (req, res, next) => {

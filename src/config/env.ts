@@ -35,6 +35,7 @@ export interface AppConfig {
   transcode480p: boolean;
   transcode720p: boolean;
   transcode1080p: boolean;
+  transcode2160p: boolean;
   hlsSegmentDuration: number;
   maxConcurrentTranscodes: number;
   autoTranscode: boolean;
@@ -55,6 +56,7 @@ function loadConfig(): AppConfig {
     transcode480p: getEnvBool('TRANSCODE_480P', true),
     transcode720p: getEnvBool('TRANSCODE_720P', true),
     transcode1080p: getEnvBool('TRANSCODE_1080P', true),
+    transcode2160p: getEnvBool('TRANSCODE_2160P', false),
     hlsSegmentDuration: getEnvInt('HLS_SEGMENT_DURATION', 6),
     maxConcurrentTranscodes: getEnvInt('MAX_CONCURRENT_TRANSCODES', 1),
     autoTranscode: getEnvBool('AUTO_TRANSCODE', true),

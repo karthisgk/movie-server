@@ -27,11 +27,13 @@ export const HeroBillboard: React.FC<HeroBillboardProps> = ({
   const hasProgress = ratio > 0 && ratio < 1;
 
   const maxQuality = movie.height
-    ? movie.height >= 1080
-      ? '1080p'
-      : movie.height >= 720
-        ? '720p'
-        : '480p'
+    ? movie.height >= 2160
+      ? '2160p'
+      : movie.height >= 1080
+        ? '1080p'
+        : movie.height >= 720
+          ? '720p'
+          : '480p'
     : 'HD';
 
   return (

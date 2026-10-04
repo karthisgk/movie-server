@@ -1,0 +1,7 @@
+{
+  "MOVIE_DIRECTORY": "C:\\Users\\KARTHICK SG\\non_share\\movies",
+  "HLS_DIRECTORY": "C:\\Users\\KARTHICK SG\\non_share\\movies\\hls",
+  "PORT": "5000",
+  "MAX_CONCURRENT_TRANSCODES": "1",
+  "AUTO_TRANSCODE": "true"
+}

@@ -10,6 +10,7 @@ import {
   ArrowLeft,
   Check,
   ChevronRight,
+  Languages,
   Loader2,
   Maximize,
   Minimize,
@@ -178,8 +179,17 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
   const [subs, setSubs] = useState<SubtitleTrack[]>([]);
   const [subIndex, setSubIndex] = useState(-1);
 
-  const [audioTracks, setAudioTracks] = useState<AudioTrackOption[]>([]);
-  const [audioTrackIndex, setAudioTrackIndex] = useState(-1);
+  const [audioTracks, setAudioTracks] = useState<AudioTrackOption[]>(() => {
+    if (movie.audioTracks && movie.audioTracks.length > 0) {
+      return movie.audioTracks.map((t, idx) => ({
+        id: idx,
+        name: t.label || `Track ${idx + 1}`,
+        lang: t.language,
+      }));
+    }
+    return [];
+  });
+  const [audioTrackIndex, setAudioTrackIndex] = useState(0);
 
   const [seekFeedback, setSeekFeedback] = useState<{ type: 'forward' | 'rewind'; id: number } | null>(null);
 
@@ -266,6 +276,20 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
           })),
         );
         void video.play().catch(() => {});
+
+        // If HLS doesn't expose multiple audio renditions (single muxed audio),
+        // fall back to movie.audioTracks from the server for informational display
+        const hlsAudioTracks = hls.audioTracks || [];
+        if (hlsAudioTracks.length <= 1 && movie.audioTracks && movie.audioTracks.length > 0) {
+          setAudioTracks(
+            movie.audioTracks.map((t, index) => ({
+              id: index,
+              name: t.label,
+              lang: t.language,
+            })),
+          );
+          setAudioTrackIndex(0);
+        }
       });
 
       hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
@@ -343,6 +367,49 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
       cancelled = true;
     };
   }, [movie.id]);
+
+  // ─── Audio track discovery ─────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/videos/${movie.id}/audio-tracks`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: Array<{ label: string; language: string; codec?: string }>) => {
+        if (!cancelled && Array.isArray(data) && data.length > 0) {
+          setAudioTracks((prev) => {
+            // If HLS has multiple audio renditions, let HLS handle them
+            if (hlsRef.current && (hlsRef.current.audioTracks?.length || 0) > 1) {
+              return prev;
+            }
+            return data.map((t, idx) => ({
+              id: idx,
+              name: t.label || `Track ${idx + 1}`,
+              lang: t.language,
+            }));
+          });
+        }
+      })
+      .catch(() => {
+        /* Audio track list is optional. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [movie.id]);
+
+  useEffect(() => {
+    if (movie.audioTracks && movie.audioTracks.length > 0) {
+      setAudioTracks((prev) => {
+        if (hlsRef.current && (hlsRef.current.audioTracks?.length || 0) > 1) {
+          return prev;
+        }
+        return movie.audioTracks!.map((t, idx) => ({
+          id: idx,
+          name: t.label || `Track ${idx + 1}`,
+          lang: t.language,
+        }));
+      });
+    }
+  }, [movie.id, movie.audioTracks]);
 
   // ─── Native media event wiring ─────────────────────────────────────────────
   useEffect(() => {
@@ -782,6 +849,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
             {subs.length > 0 && subIndex >= 0 ? (
               <span className="player-chip">{subs[subIndex]?.label}</span>
             ) : null}
+            {audioTracks.length > 1 && audioTrackIndex >= 0 ? (
+              <span className="player-chip">🔊 {audioTracks.find((t) => t.id === audioTrackIndex)?.name ?? 'Audio'}</span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -866,6 +936,16 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
           <span className="quality-pill">{qualityLabel}</span>
 
           <button
+            className={`control-btn ${menu === 'audio' ? 'is-active' : ''}`}
+            type="button"
+            onClick={() => (menu === 'audio' ? closeMenu() : openMenu('audio'))}
+            aria-label="Audio tracks"
+            title={audioTracks.find((t) => t.id === audioTrackIndex)?.name ?? 'Audio tracks'}
+          >
+            <Languages size={22} />
+          </button>
+
+          <button
             className="control-btn"
             type="button"
             onClick={() => (menu === 'none' ? openMenu('root') : closeMenu())}
@@ -914,13 +994,11 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
                 onClick={() => setMenu('speed')}
               />
               <MenuRow label="Quality" value={qualityLabel} onClick={() => setMenu('quality')} />
-              {audioTracks.length > 1 && (
-                <MenuRow
-                  label="Audio"
-                  value={audioTracks.find((t) => t.id === audioTrackIndex)?.name ?? 'Default'}
-                  onClick={() => setMenu('audio')}
-                />
-              )}
+              <MenuRow
+                label="Audio"
+                value={audioTracks.find((t) => t.id === audioTrackIndex)?.name ?? audioTracks[0]?.name ?? 'Default'}
+                onClick={() => setMenu('audio')}
+              />
               {subs.length > 0 && (
                 <MenuRow
                   label="Subtitles"
@@ -984,15 +1062,25 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({ movie, onClose }) => {
 
           {menu === 'audio' && (
             <>
-              <div className="settings-title">Audio Track</div>
-              {audioTracks.map((track) => (
+              <div className="settings-title">
+                <Languages size={16} /> Audio Track
+              </div>
+              {audioTracks.length === 0 ? (
                 <MenuRow
-                  key={track.id}
-                  label={track.name}
-                  active={audioTrackIndex === track.id}
-                  onClick={() => changeAudioTrack(track.id)}
+                  label="Default Audio"
+                  active={true}
+                  onClick={() => {}}
                 />
-              ))}
+              ) : (
+                audioTracks.map((track) => (
+                  <MenuRow
+                    key={track.id}
+                    label={track.name}
+                    active={audioTrackIndex === track.id || (audioTrackIndex === -1 && track.id === 0)}
+                    onClick={() => changeAudioTrack(track.id)}
+                  />
+                ))
+              )}
             </>
           )}
         </div>

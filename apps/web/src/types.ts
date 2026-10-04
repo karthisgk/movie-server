@@ -20,6 +20,8 @@ export interface PublicMovie {
   height?: number;
   videoCodec?: string;
   audioCodec?: string;
+  /** Audio tracks detected in the source file */
+  audioTracks?: AudioTrackInfo[];
   createdAt: string;
   updatedAt: string;
   playUrl: string;
@@ -54,4 +56,13 @@ export interface WatchProgress {
   duration: number;
   /** Epoch millis of the last update */
   updatedAt: number;
+}
+
+/** Audio track metadata from the source file. */
+export interface AudioTrackInfo {
+  streamIndex: number;
+  language: string;
+  label: string;
+  codec: string;
+  channels: number;
 }

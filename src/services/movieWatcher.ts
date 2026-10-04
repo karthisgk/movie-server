@@ -297,6 +297,7 @@ export class MovieWatcher {
         height: mediaInfo.height,
         videoCodec: mediaInfo.videoCodec,
         audioCodec: mediaInfo.audioCodec,
+        audioTracks: mediaInfo.audioTracks.length > 0 ? mediaInfo.audioTracks : undefined,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -335,6 +336,7 @@ export class MovieWatcher {
           transcode480p: this.config.transcode480p,
           transcode720p: this.config.transcode720p,
           transcode1080p: this.config.transcode1080p,
+          transcode2160p: this.config.transcode2160p,
         },
         QUALITY_PROFILES,
       );
@@ -380,6 +382,7 @@ export class MovieWatcher {
             audioCodec: movie.audioCodec ?? '',
             hasVideo: true,
             hasAudio: !!movie.audioCodec,
+            audioTracks: movie.audioTracks ?? [],
           },
           ffmpegPath: this.config.ffmpegPath,
           sourceSizeBytes: stats.size,
