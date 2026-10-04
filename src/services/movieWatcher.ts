@@ -297,6 +297,7 @@ export class MovieWatcher {
         height: mediaInfo.height,
         videoCodec: mediaInfo.videoCodec,
         audioCodec: mediaInfo.audioCodec,
+        audioTracks: mediaInfo.audioTracks.length > 0 ? mediaInfo.audioTracks : undefined,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -380,6 +381,7 @@ export class MovieWatcher {
             audioCodec: movie.audioCodec ?? '',
             hasVideo: true,
             hasAudio: !!movie.audioCodec,
+            audioTracks: movie.audioTracks ?? [],
           },
           ffmpegPath: this.config.ffmpegPath,
           sourceSizeBytes: stats.size,

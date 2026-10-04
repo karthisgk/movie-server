@@ -1,7 +1,7 @@
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
-import { FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
+import { AudioTrackInfo, FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
 import { ensureDir, writeJsonFile } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { HlsMetadata } from '../types/movie.js';
@@ -14,6 +14,8 @@ export interface MediaInfo {
   audioCodec: string;
   hasVideo: boolean;
   hasAudio: boolean;
+  /** All audio tracks discovered in the source file */
+  audioTracks: AudioTrackInfo[];
 }
 
 export interface TranscodeOptions {
@@ -98,7 +100,8 @@ export async function getMediaInfo(filePath: string, ffprobePath: string): Promi
   const output = await runFfprobe(filePath, ffprobePath);
 
   const videoStream = output.streams.find((s) => s.codec_type === 'video');
-  const audioStream = output.streams.find((s) => s.codec_type === 'audio');
+  const audioStreams = output.streams.filter((s) => s.codec_type === 'audio');
+  const audioStream = audioStreams[0];
 
   if (!videoStream) {
     throw new Error(`No valid video stream found in: ${path.basename(filePath)}`);
@@ -106,6 +109,30 @@ export async function getMediaInfo(filePath: string, ffprobePath: string): Promi
 
   const durationStr = output.format.duration;
   const durationSeconds = durationStr ? parseFloat(durationStr) : 0;
+
+  // Build audio track info for every audio stream
+  const audioTracks: AudioTrackInfo[] = audioStreams.map((s, idx) => {
+    const lang = s.tags?.language ?? 'und';
+    const title = s.tags?.title;
+    const channels = s.channels ?? 2;
+    const channelLabel = channels >= 6 ? '5.1' : channels === 1 ? 'Mono' : 'Stereo';
+    const langName = languageCodeToName(lang);
+    let label = langName;
+    if (title && !title.toLowerCase().includes(langName.toLowerCase()) && lang !== 'und') {
+      label = `${langName} - ${title} (${channelLabel})`;
+    } else if (title) {
+      label = `${title} (${channelLabel})`;
+    } else {
+      label = `${langName} (${channelLabel})`;
+    }
+    return {
+      streamIndex: s.index ?? idx,
+      language: lang,
+      label,
+      codec: s.codec_name,
+      channels,
+    };
+  });
 
   return {
     durationSeconds,
@@ -115,7 +142,26 @@ export async function getMediaInfo(filePath: string, ffprobePath: string): Promi
     audioCodec: audioStream?.codec_name ?? '',
     hasVideo: true,
     hasAudio: !!audioStream,
+    audioTracks,
   };
+}
+
+/** Map common ISO 639-2/3 language codes to human-readable names. */
+function languageCodeToName(code: string): string {
+  const map: Record<string, string> = {
+    eng: 'English', hin: 'Hindi', tam: 'Tamil', tel: 'Telugu',
+    kan: 'Kannada', mal: 'Malayalam', mar: 'Marathi', ben: 'Bengali',
+    guj: 'Gujarati', pan: 'Punjabi', urd: 'Urdu', spa: 'Spanish',
+    fre: 'French', fra: 'French', ger: 'German', deu: 'German',
+    ita: 'Italian', por: 'Portuguese', rus: 'Russian', jpn: 'Japanese',
+    kor: 'Korean', chi: 'Chinese', zho: 'Chinese', ara: 'Arabic',
+    tha: 'Thai', vie: 'Vietnamese', ind: 'Indonesian', may: 'Malay',
+    msa: 'Malay', tur: 'Turkish', pol: 'Polish', nld: 'Dutch',
+    dut: 'Dutch', swe: 'Swedish', nor: 'Norwegian', dan: 'Danish',
+    fin: 'Finnish', ces: 'Czech', cze: 'Czech', ron: 'Romanian',
+    rum: 'Romanian', hun: 'Hungarian', und: 'Unknown',
+  };
+  return map[code.toLowerCase()] ?? code.toUpperCase();
 }
 
 function runFfprobe(filePath: string, ffprobePath: string): Promise<FfprobeOutput> {
@@ -275,7 +321,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   updateOverallProgress();
 
   if (toTranscode.length === 0) {
-    await writeMasterPlaylist(finalDir, completedProfiles);
+    await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
     if (onProgress) {
       onProgress(100, sortedProfiles[0].name);
     }
@@ -317,6 +363,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
         segmentDuration,
         ffmpegPath,
         durationSeconds: sourceInfo.durationSeconds,
+        audioTracks: sourceInfo.audioTracks,
       };
 
       return new Promise<void>((resolve, reject) => {
@@ -358,7 +405,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
             if (!completedProfiles.some((p) => p.name === profile.name)) {
               completedProfiles.push(profile);
               completedProfiles.sort((a, b) => b.height - a.height);
-              await writeMasterPlaylist(finalDir, completedProfiles);
+              await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
               logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
 
               if (onProfileComplete) {
@@ -425,6 +472,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
       videoCodec: sourceInfo.videoCodec,
       audioCodec: sourceInfo.audioCodec,
       completedProfiles: allCompleted.map((p) => p.name),
+      audioTracks: sourceInfo.audioTracks.length > 0 ? sourceInfo.audioTracks : undefined,
     };
     await writeJsonFile(path.join(finalDir, 'metadata.json'), metadata);
 
@@ -440,7 +488,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   }
 }
 
-async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]): Promise<void> {
+async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[], audioTracks?: AudioTrackInfo[]): Promise<void> {
   const bandwidthMap: Record<string, number> = {
     '480p': 1400000,
     '720p': 2996000,
@@ -452,12 +500,34 @@ async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]
     '1080p': '1920x1080',
   };
 
+  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
+  const audioGroupId = 'audio-tracks';
+
   let content = '#EXTM3U\n#EXT-X-VERSION:3\n\n';
+
+  if (hasMultipleAudio) {
+    for (let i = 0; i < audioTracks.length; i++) {
+      const track = audioTracks[i];
+      const isDefault = i === 0 ? 'YES' : 'NO';
+      const name = track.label.replace(/"/g, "'");
+      const lang = track.language;
+
+      if (i === 0) {
+        // Default track (track 0) is embedded in the video segments — no separate URI needed
+        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault}\n`;
+      } else {
+        // Alternate audio tracks are stored at audio_i/playlist.m3u8 relative to master.m3u8
+        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="audio_${i}/playlist.m3u8"\n`;
+      }
+    }
+    content += '\n';
+  }
 
   for (const profile of profiles) {
     const bandwidth = bandwidthMap[profile.name] ?? 2000000;
     const resolution = resolutionMap[profile.name] ?? `${profile.width}x${profile.height}`;
-    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"\n`;
+    const audioAttr = hasMultipleAudio ? `,AUDIO="${audioGroupId}"` : '';
+    content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"${audioAttr}\n`;
     content += `${profile.name}/playlist.m3u8\n\n`;
   }
 
