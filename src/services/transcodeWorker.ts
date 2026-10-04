@@ -1,7 +1,6 @@
 import { parentPort, workerData } from 'worker_threads';
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
-import fs from 'fs/promises';
 import { AudioTrackInfo, QualityProfile } from '../types/movie.js';
 
 export interface TranscodeWorkerData {
@@ -40,14 +39,20 @@ parentPort.on('message', (msg: MainToWorkerMessage) => {
   }
 });
 
-function runFfmpeg(args: string[], ffmpegPath: string, durationSeconds: number, profileName: string): Promise<void> {
+function runFfmpeg(
+  args: string[],
+  ffmpegPath: string,
+  durationSeconds: number,
+  profileName: string,
+  cwd?: string,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     if (isCancelled) {
       reject(new Error('Transcoding cancelled before start'));
       return;
     }
 
-    proc = spawn(ffmpegPath, args, { stdio: 'pipe' });
+    proc = spawn(ffmpegPath, args, { stdio: 'pipe', cwd });
 
     let stderrOutput = '';
     let stderrBuffer = '';
@@ -104,7 +109,6 @@ async function runWorker(): Promise<void> {
   const { inputPath, outputDir, profile, segmentDuration, ffmpegPath, durationSeconds, audioTracks } = data;
 
   const playlistPath = path.join(outputDir, 'playlist.m3u8');
-  const segmentPattern = path.join(outputDir, 'segment_%03d.ts');
 
   const scaleFilter =
     `scale=${profile.width}:${profile.height}:` +
@@ -112,75 +116,76 @@ async function runWorker(): Promise<void> {
     `pad=${profile.width}:${profile.height}:(ow-iw)/2:(oh-ih)/2,` +
     `format=yuv420p`;
 
-  // ── Step 1: Transcode video + default (first) audio track ──────────────────
-  const args = [
-    '-i', inputPath,
-    '-map', '0:v:0',
-    '-map', '0:a:0?',
-    '-c:v', 'libx264',
-    '-preset', 'veryfast',
-    '-crf', '23',
-    '-maxrate', profile.videoBitrate,
-    '-bufsize', `${parseInt(profile.videoBitrate, 10) * 2}k`,
-    '-vf', scaleFilter,
-    '-c:a', 'aac',
-    '-b:a', profile.audioBitrate,
-    '-ac', '2',
-    '-f', 'hls',
-    '-hls_time', String(segmentDuration),
-    '-hls_list_size', '0',
-    '-hls_segment_type', 'mpegts',
-    '-hls_segment_filename', segmentPattern,
-    '-hls_flags', 'independent_segments',
-    '-progress', 'pipe:2',
-    '-nostats',
-    playlistPath,
-  ];
+  const hasMultipleAudio = !!(audioTracks && audioTracks.length > 1);
 
-  await runFfmpeg(args, ffmpegPath, durationSeconds, profile.name);
-
-  // ── Step 2: Extract alternate audio tracks (only once per movie) ───────────
-  // We extract audio tracks into <finalDir>/audio_<i designator>
-  const finalDir = path.dirname(outputDir);
-  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
-
+  // ── Multi-audio: video-only fMP4 variant ────────────────────────────────────
+  // Each audio track is emitted as its own fMP4 rendition by the orchestrator
+  // (ffmpegService → audioExtractionService) and wired through #EXT-X-MEDIA.
+  //
+  // The container matters: MPEG-TS alternate audio was unreliable with hls.js
+  // (packet-level demux/timestamp drift froze seeking). Fragmented MP4 (CMAF)
+  // carries explicit base-decode-times (tfdt) and is remuxed natively by
+  // hls.js/ExoPlayer, so audio and video stay aligned when scrubbing.
+  //
+  // We also force a keyframe exactly on each segment boundary and disable
+  // scene-change keyframes so every video segment is exactly `segmentDuration`
+  // long, matching the audio rendition's segment boundaries.
   if (hasMultipleAudio) {
-    for (let i = 1; i < audioTracks.length; i++) {
-      if (isCancelled) break;
-      const audioDir = path.join(finalDir, `audio_${i}`);
-      const audioPlaylistPath = path.join(audioDir, 'playlist.m3u8');
+    const videoOnlyArgs = [
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-an',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-maxrate', profile.videoBitrate,
+      '-bufsize', `${parseInt(profile.videoBitrate, 10) * 2}k`,
+      '-vf', scaleFilter,
+      '-force_key_frames', `expr:gte(t,n_forced*${segmentDuration})`,
+      '-sc_threshold', '0',
+      '-f', 'hls',
+      '-hls_time', String(segmentDuration),
+      '-hls_list_size', '0',
+      '-hls_segment_type', 'fmp4',
+      '-hls_fmp4_init_filename', 'init.mp4',
+      '-hls_segment_filename', 'segment_%03d.m4s',
+      '-hls_flags', 'independent_segments',
+      '-progress', 'pipe:2',
+      '-nostats',
+      'playlist.m3u8',
+    ];
 
-      // If audio playlist already exists (e.g. created by another worker), skip
-      try {
-        await fs.access(audioPlaylistPath);
-        continue;
-      } catch {
-        // file doesn't exist — proceed to create
-      }
+    // cwd = outputDir so FFmpeg writes init.mp4 + segments alongside playlist.m3u8
+    // (FFmpeg resolves the relative init/segment filenames against the CWD).
+    await runFfmpeg(videoOnlyArgs, ffmpegPath, durationSeconds, profile.name, outputDir);
+  } else {
+    // ── Single-audio: muxed variant (unchanged, known-good path) ─────────────
+    const segmentPattern = path.join(outputDir, 'segment_%03d.ts');
+    const args = [
+      '-i', inputPath,
+      '-map', '0:v:0',
+      '-map', '0:a:0?',
+      '-c:v', 'libx264',
+      '-preset', 'veryfast',
+      '-crf', '23',
+      '-maxrate', profile.videoBitrate,
+      '-bufsize', `${parseInt(profile.videoBitrate, 10) * 2}k`,
+      '-vf', scaleFilter,
+      '-c:a', 'aac',
+      '-b:a', profile.audioBitrate,
+      '-ac', '2',
+      '-f', 'hls',
+      '-hls_time', String(segmentDuration),
+      '-hls_list_size', '0',
+      '-hls_segment_type', 'mpegts',
+      '-hls_segment_filename', segmentPattern,
+      '-hls_flags', 'independent_segments',
+      '-progress', 'pipe:2',
+      '-nostats',
+      playlistPath,
+    ];
 
-      await fs.mkdir(audioDir, { recursive: true });
-      const audioSegmentPattern = path.join(audioDir, 'segment_%03d.ts');
-
-      const audioArgs = [
-        '-i', inputPath,
-        '-map', `0:a:${i}`,
-        '-vn',
-        '-c:a', 'aac',
-        '-b:a', profile.audioBitrate,
-        '-ac', '2',
-        '-f', 'hls',
-        '-hls_time', String(segmentDuration),
-        '-hls_list_size', '0',
-        '-hls_segment_type', 'mpegts',
-        '-hls_segment_filename', audioSegmentPattern,
-        '-hls_flags', 'independent_segments',
-        '-progress', 'pipe:2',
-        '-nostats',
-        audioPlaylistPath,
-      ];
-
-      await runFfmpeg(audioArgs, ffmpegPath, durationSeconds, profile.name);
-    }
+    await runFfmpeg(args, ffmpegPath, durationSeconds, profile.name);
   }
 
   parentPort?.postMessage({ type: 'progress', profileName: profile.name, percent: 100 });

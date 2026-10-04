@@ -287,6 +287,19 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
     // 1. Intercept master.m3u8: if multi-audio is present, dynamically generate master playlist with audio groups
     if (rest === 'master.m3u8') {
       if (movie && movie.audioTracks && movie.audioTracks.length > 1) {
+        // Make sure every advertised audio rendition actually exists before the
+        // master references it — a missing alternate-audio playlist makes hls.js
+        // buffer forever instead of playing.
+        const sourcePath = movie.sourcePath;
+        if (sourcePath && ffmpegPath) {
+          await Promise.all(
+            movie.audioTracks.map((_track, index) =>
+              ensureAudioTrackExtracted(id, sourcePath, index, hlsDirectory, ffmpegPath).catch((err: unknown) => {
+                logger.warn(`On-demand audio extraction failed for ${id} track ${index}: ${err}`);
+              }),
+            ),
+          );
+        }
         try {
           const playlistContent = await generateMasterPlaylistContent(id, hlsDirectory, movie);
           res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
@@ -342,6 +355,14 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
     } else if (ext === '.ts') {
       res.setHeader('Content-Type', 'video/mp2t');
       // Segments: can be cached
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+    } else if (ext === '.m4s') {
+      res.setHeader('Content-Type', 'video/iso.segment');
+      // fMP4 segments: can be cached
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+    } else if (ext === '.mp4') {
+      // fMP4 init segment (init.mp4)
+      res.setHeader('Content-Type', 'video/mp4');
       res.setHeader('Cache-Control', 'public, max-age=3600');
     } else if (ext === '.vtt') {
       res.setHeader('Content-Type', 'text/vtt; charset=utf-8');

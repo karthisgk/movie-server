@@ -3,13 +3,33 @@ import path from 'path';
 import fs from 'fs/promises';
 import { fileExists } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
-import { Movie, QualityProfile } from '../types/movie.js';
+import { Movie } from '../types/movie.js';
 
 const activeAudioJobs = new Map<string, Promise<void>>();
+
+/** Returns the audio tracks whose `audio_<i>/playlist.m3u8` actually exists. */
+export async function existingAudioTrackIndices(
+  movieId: string,
+  hlsDirectory: string,
+  audioTracks: unknown[] | undefined,
+): Promise<number[]> {
+  const count = Array.isArray(audioTracks) ? audioTracks.length : 0;
+  const indices: number[] = [];
+  for (let i = 0; i < count; i++) {
+    if (await fileExists(path.join(hlsDirectory, movieId, `audio_${i}`, 'playlist.m3u8'))) {
+      indices.push(i);
+    }
+  }
+  return indices;
+}
 
 /**
  * Ensures that the HLS audio playlist and segments for a specific audio track
  * are extracted to `hlsDirectory/<movieId>/audio_<trackIndex>/`.
+ *
+ * Emits fragmented MP4 (CMAF) so the audio rendition shares the same container
+ * model as the video variants — hls.js remuxes fMP4 natively, which keeps
+ * audio/video timestamps aligned while scrubbing (MPEG-TS alternates drifted).
  *
  * Spawns an on-demand ffmpeg process if not already extracted or in progress,
  * and waits until `playlist.m3u8` exists so the HTTP request can respond immediately.
@@ -20,6 +40,7 @@ export async function ensureAudioTrackExtracted(
   trackIndex: number,
   hlsDirectory: string,
   ffmpegPath: string,
+  segmentDuration = 6,
 ): Promise<void> {
   const audioDir = path.join(hlsDirectory, movieId, `audio_${trackIndex}`);
   const playlistFile = path.join(audioDir, 'playlist.m3u8');
@@ -38,7 +59,7 @@ export async function ensureAudioTrackExtracted(
   const jobPromise = (async () => {
     try {
       await fs.mkdir(audioDir, { recursive: true });
-      logger.info(`Starting on-demand HLS audio extraction for "${movieId}" (audio track index: ${trackIndex})`);
+      logger.info(`Starting HLS audio extraction for "${movieId}" (audio track index: ${trackIndex})`);
 
       const args = [
         '-y',
@@ -49,14 +70,18 @@ export async function ensureAudioTrackExtracted(
         '-b:a', '128k',
         '-ac', '2',
         '-f', 'hls',
-        '-hls_time', '6',
+        '-hls_time', String(segmentDuration),
         '-hls_list_size', '0',
-        '-hls_segment_type', 'mpegts',
-        '-hls_segment_filename', path.join(audioDir, 'segment_%03d.ts'),
-        playlistFile,
+        '-hls_segment_type', 'fmp4',
+        '-hls_fmp4_init_filename', 'init.mp4',
+        '-hls_segment_filename', 'segment_%03d.m4s',
+        '-hls_flags', 'independent_segments',
+        'playlist.m3u8',
       ];
 
-      const proc = spawn(ffmpegPath, args, { stdio: 'pipe' });
+      // cwd = audioDir so init.mp4 lands next to playlist.m3u8 (FFmpeg resolves
+      // the relative init/segment filenames against the CWD, not the playlist).
+      const proc = spawn(ffmpegPath, args, { stdio: 'pipe', cwd: audioDir });
 
       let stderrOutput = '';
       proc.stderr?.on('data', (d: Buffer) => {
@@ -99,6 +124,10 @@ export async function ensureAudioTrackExtracted(
 /**
  * Dynamically generates a master.m3u8 playlist string for a movie,
  * wiring #EXT-X-MEDIA:TYPE=AUDIO groups for all detected audio tracks.
+ *
+ * Only tracks whose `audio_<i>/playlist.m3u8` exists are advertised — referencing
+ * a missing alternate-audio playlist makes hls.js stall in an endless buffering
+ * state, which is exactly the regression we are fixing.
  */
 export async function generateMasterPlaylistContent(
   movieId: string,
@@ -132,26 +161,29 @@ export async function generateMasterPlaylistContent(
   }
 
   const audioTracks = movie.audioTracks || [];
-  const hasMultipleAudio = audioTracks.length > 1;
+  const availableAudio = await existingAudioTrackIndices(movieId, hlsDirectory, audioTracks);
+  const useAudioGroup = audioTracks.length > 1 && availableAudio.length >= 1;
   const audioGroupId = 'audio-tracks';
 
-  let content = '#EXTM3U\n#EXT-X-VERSION:3\n\n';
+  // fMP4 media playlists require EXT-X-VERSION >= 7.
+  const masterVersion = audioTracks.length > 1 ? 7 : 3;
+  let content = `#EXTM3U\n#EXT-X-VERSION:${masterVersion}\n\n`;
 
-  if (hasMultipleAudio) {
-    for (let i = 0; i < audioTracks.length; i++) {
+  if (useAudioGroup) {
+    availableAudio.forEach((i, order) => {
       const track = audioTracks[i];
-      const isDefault = i === 0 ? 'YES' : 'NO';
+      const isDefault = order === 0 ? 'YES' : 'NO';
       const name = (track.label || `Track ${i + 1}`).replace(/"/g, "'");
       const lang = track.language || 'und';
       content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="audio_${i}/playlist.m3u8"\n`;
-    }
+    });
     content += '\n';
   }
 
   for (const profileName of availableProfiles) {
     const bandwidth = bandwidthMap[profileName] ?? 2000000;
     const resolution = resolutionMap[profileName] ?? '1920x1080';
-    const audioAttr = hasMultipleAudio ? `,AUDIO="${audioGroupId}"` : '';
+    const audioAttr = useAudioGroup ? `,AUDIO="${audioGroupId}"` : '';
     content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"${audioAttr}\n`;
     content += `${profileName}/playlist.m3u8\n\n`;
   }

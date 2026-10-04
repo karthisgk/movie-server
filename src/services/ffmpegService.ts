@@ -5,6 +5,7 @@ import { AudioTrackInfo, FfprobeOutput, QUALITY_PROFILES, QualityProfile } from 
 import { ensureDir, writeJsonFile } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { HlsMetadata } from '../types/movie.js';
+import { ensureAudioTrackExtracted } from './audioExtractionService.js';
 
 export interface MediaInfo {
   durationSeconds: number;
@@ -320,6 +321,34 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   // Initial progress update
   updateOverallProgress();
 
+  // ── Multi-audio: materialise every audio rendition up-front ─────────────────
+  // Multi-audio video variants are video-only, so each audio track MUST exist as
+  // its own rendition before any master.m3u8 references it. Doing this once here
+  // (including for already-completed movies) prevents the master from pointing at
+  // an audio playlist that does not exist — which makes hls.js buffer forever.
+  if (sourceInfo.audioTracks.length > 1) {
+    let sourceExists = true;
+    try {
+      await fs.access(inputPath);
+    } catch {
+      sourceExists = false;
+    }
+
+    if (sourceExists) {
+      await Promise.all(
+        sourceInfo.audioTracks.map((_track, index) =>
+          ensureAudioTrackExtracted(movieId, inputPath, index, hlsDirectory, ffmpegPath, segmentDuration).catch(
+            (err: unknown) => {
+              logger.warn(
+                `Audio track ${index} extraction failed for ${movieId}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            },
+          ),
+        ),
+      );
+    }
+  }
+
   if (toTranscode.length === 0) {
     await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
     if (onProgress) {
@@ -500,33 +529,43 @@ async function writeMasterPlaylist(outputDir: string, profiles: QualityProfile[]
     '1080p': '1920x1080',
   };
 
-  const hasMultipleAudio = audioTracks && audioTracks.length > 1;
+  const tracks = audioTracks ?? [];
+
+  // Only advertise audio renditions that actually exist. Referencing a missing
+  // alternate-audio playlist makes hls.js stall in an endless buffering state.
+  const availableAudio: number[] = [];
+  for (let i = 0; i < tracks.length; i++) {
+    try {
+      await fs.access(path.join(outputDir, `audio_${i}`, 'playlist.m3u8'));
+      availableAudio.push(i);
+    } catch {
+      // rendition not present
+    }
+  }
+
+  // Multi-audio video variants are video-only, so the audio group is required.
+  const useAudioGroup = tracks.length > 1 && availableAudio.length >= 1;
   const audioGroupId = 'audio-tracks';
 
-  let content = '#EXTM3U\n#EXT-X-VERSION:3\n\n';
+  // fMP4 media playlists require EXT-X-VERSION >= 7; muxed TS stays at 3.
+  const masterVersion = tracks.length > 1 ? 7 : 3;
+  let content = `#EXTM3U\n#EXT-X-VERSION:${masterVersion}\n\n`;
 
-  if (hasMultipleAudio) {
-    for (let i = 0; i < audioTracks.length; i++) {
-      const track = audioTracks[i];
-      const isDefault = i === 0 ? 'YES' : 'NO';
-      const name = track.label.replace(/"/g, "'");
-      const lang = track.language;
-
-      if (i === 0) {
-        // Default track (track 0) is embedded in the video segments — no separate URI needed
-        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault}\n`;
-      } else {
-        // Alternate audio tracks are stored at audio_i/playlist.m3u8 relative to master.m3u8
-        content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="audio_${i}/playlist.m3u8"\n`;
-      }
-    }
+  if (useAudioGroup) {
+    availableAudio.forEach((i, order) => {
+      const track = tracks[i];
+      const isDefault = order === 0 ? 'YES' : 'NO';
+      const name = (track.label || `Track ${i + 1}`).replace(/"/g, "'");
+      const lang = track.language || 'und';
+      content += `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="${audioGroupId}",NAME="${name}",LANGUAGE="${lang}",DEFAULT=${isDefault},AUTOSELECT=${isDefault},URI="audio_${i}/playlist.m3u8"\n`;
+    });
     content += '\n';
   }
 
   for (const profile of profiles) {
     const bandwidth = bandwidthMap[profile.name] ?? 2000000;
     const resolution = resolutionMap[profile.name] ?? `${profile.width}x${profile.height}`;
-    const audioAttr = hasMultipleAudio ? `,AUDIO="${audioGroupId}"` : '';
+    const audioAttr = useAudioGroup ? `,AUDIO="${audioGroupId}"` : '';
     content += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${resolution},CODECS="avc1.42e01e,mp4a.40.2"${audioAttr}\n`;
     content += `${profile.name}/playlist.m3u8\n\n`;
   }
