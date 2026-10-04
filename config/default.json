@@ -1,0 +1,12 @@
+{
+  "HOST": "0.0.0.0",
+  "FFMPEG_PATH": "C:\\Users\\KARTHICK SG\\Downloads\\ffmpeg-master-latest-win64-gpl\\ffmpeg-master-latest-win64-gpl\\bin\\ffmpeg.exe",
+  "FFPROBE_PATH": "C:\\Users\\KARTHICK SG\\Downloads\\ffmpeg-master-latest-win64-gpl\\ffmpeg-master-latest-win64-gpl\\bin\\ffprobe.exe",
+  "TRANSCODE_480P": "true",
+  "TRANSCODE_720P": "true",
+  "TRANSCODE_1080P": "true",
+  "TRANSCODE_2160P": "true",
+  "HLS_SEGMENT_DURATION": "6",
+  "MAX_CONCURRENT_TRANSCODES": "1",
+  "AUTO_TRANSCODE": "true"
+}

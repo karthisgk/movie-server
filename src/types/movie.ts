@@ -38,6 +38,8 @@ export interface Movie {
 
   videoCodec?: string;
   audioCodec?: string;
+  /** Audio tracks detected in the source file */
+  audioTracks?: AudioTrackInfo[];
 
   createdAt: string;
   updatedAt: string;
@@ -61,10 +63,12 @@ export interface HlsMetadata {
   audioCodec?: string;
   /** Profiles that completed before a crash — used to resume partial transcoding on restart. */
   completedProfiles?: string[];
+  /** Audio tracks detected in the source file */
+  audioTracks?: AudioTrackInfo[];
 }
 
 export interface QualityProfile {
-  name: '480p' | '720p' | '1080p';
+  name: '480p' | '720p' | '1080p' | '2160p';
   width: number;
   height: number;
   videoBitrate: string;
@@ -75,6 +79,7 @@ export const QUALITY_PROFILES: QualityProfile[] = [
   { name: '480p', width: 854, height: 480, videoBitrate: '1200k', audioBitrate: '128k' },
   { name: '720p', width: 1280, height: 720, videoBitrate: '2800k', audioBitrate: '128k' },
   { name: '1080p', width: 1920, height: 1080, videoBitrate: '5000k', audioBitrate: '128k' },
+  { name: '2160p', width: 3840, height: 2160, videoBitrate: '15000k', audioBitrate: '192k' },
 ];
 
 export const SUPPORTED_EXTENSIONS = new Set(['.mp4', '.mkv', '.mov', '.avi', '.m4v', '.webm']);
@@ -84,6 +89,15 @@ export interface FfprobeStreamInfo {
   codec_name: string;
   width?: number;
   height?: number;
+  /** Stream index in the container (used for -map 0:<index>) */
+  index?: number;
+  tags?: {
+    language?: string;
+    title?: string;
+    [key: string]: string | undefined;
+  };
+  channels?: number;
+  sample_rate?: string;
 }
 
 export interface FfprobeFormatInfo {
@@ -93,4 +107,18 @@ export interface FfprobeFormatInfo {
 export interface FfprobeOutput {
   streams: FfprobeStreamInfo[];
   format: FfprobeFormatInfo;
+}
+
+/** Describes a single audio track detected in the source media file. */
+export interface AudioTrackInfo {
+  /** Stream index within the container (e.g. 0:1, 0:2) */
+  streamIndex: number;
+  /** ISO 639 language code, e.g. 'eng', 'hin', 'tam' */
+  language: string;
+  /** Human-readable label, e.g. 'English', 'Hindi 5.1' */
+  label: string;
+  /** Audio codec, e.g. 'aac', 'ac3', 'dts' */
+  codec: string;
+  /** Number of audio channels (e.g. 2, 6) */
+  channels: number;
 }
