@@ -1,11 +1,19 @@
 import React from 'react';
-import { X, Cpu, Clock, CheckCircle2, Layers, AlertCircle } from 'lucide-react';
-import { PublicMovie } from '../types';
+import { X, Cpu, Clock, CheckCircle2, Layers, AlertCircle, Music } from 'lucide-react';
+import { EXTRACTING_AUDIO_PROFILE, PublicMovie } from '../types';
 
 interface TranscodingQueueDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   movies: PublicMovie[];
+}
+
+/** A movie whose video is done and whose audio renditions are being extracted. */
+function isExtractingAudio(m: PublicMovie): boolean {
+  return (
+    m.transcodingProfile === EXTRACTING_AUDIO_PROFILE ||
+    ((m.status === 'processing' || m.status === 'partial') && (m.transcodingProgress ?? 0) === 100)
+  );
 }
 
 export const TranscodingQueueDrawer: React.FC<TranscodingQueueDrawerProps> = ({
@@ -16,12 +24,17 @@ export const TranscodingQueueDrawer: React.FC<TranscodingQueueDrawerProps> = ({
   if (!isOpen) return null;
 
   const activeMovie = movies.find(
-    (m) => m.status === 'processing' || (m.status === 'partial' && (m.transcodingProgress ?? 0) < 100)
+    (m) =>
+      m.status === 'processing' ||
+      isExtractingAudio(m) ||
+      (m.status === 'partial' && (m.transcodingProgress ?? 0) < 100)
   );
 
   const queuedMovies = movies.filter((m) => m.status === 'queued');
   const completedMovies = movies.filter(
-    (m) => m.status === 'ready' || (m.status === 'partial' && (m.transcodingProgress ?? 0) === 100)
+    (m) =>
+      m.status === 'ready' ||
+      (m.status === 'partial' && (m.transcodingProgress ?? 0) === 100 && !isExtractingAudio(m))
   );
 
   return (
@@ -117,10 +130,17 @@ export const TranscodingQueueDrawer: React.FC<TranscodingQueueDrawerProps> = ({
 
               {/* Active workers badge list */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                <span>Active Workers:</span>
-                <span style={{ background: 'rgba(0, 242, 254, 0.15)', color: 'var(--accent-cyan)', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
-                  {activeMovie.transcodingProfile || '720p + 1080p'}
-                </span>
+                <span>{isExtractingAudio(activeMovie) ? 'Phase:' : 'Active Workers:'}</span>
+                {isExtractingAudio(activeMovie) ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: 'rgba(0, 242, 254, 0.15)', color: 'var(--accent-cyan)', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
+                    <Music size={12} className="spin" />
+                    extracting audio tracks
+                  </span>
+                ) : (
+                  <span style={{ background: 'rgba(0, 242, 254, 0.15)', color: 'var(--accent-cyan)', padding: '2px 8px', borderRadius: 4, fontWeight: 700 }}>
+                    {activeMovie.transcodingProfile || '720p + 1080p'}
+                  </span>
+                )}
               </div>
             </div>
           ) : (

@@ -6,6 +6,12 @@ export type MovieStatus =
   | 'ready'
   | 'failed';
 
+/**
+ * Value of `transcodingProfile` while audio renditions are extracted after the
+ * video waterfall finishes. Must match the server constant.
+ */
+export const EXTRACTING_AUDIO_PROFILE = 'extracting audio tracks';
+
 /** Public movie representation returned by GET /videos (no filesystem paths). */
 export interface PublicMovie {
   id: string;
@@ -61,6 +67,8 @@ export interface WatchProgress {
 /** Audio track metadata from the source file. */
 export interface AudioTrackInfo {
   streamIndex: number;
+  /** Position among the source's audio streams (`0:a:<n>`); may be absent on older data. */
+  sourceAudioIndex?: number;
   language: string;
   label: string;
   codec: string;

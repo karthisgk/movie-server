@@ -1,6 +1,6 @@
 import React from 'react';
 import { Info, Play, RotateCcw } from 'lucide-react';
-import { PublicMovie, WatchProgress } from '../types';
+import { EXTRACTING_AUDIO_PROFILE, PublicMovie, WatchProgress } from '../types';
 import {
   cleanTitle,
   extractYear,
@@ -30,13 +30,20 @@ export const MovieCard: React.FC<MovieCardProps> = ({
   const ratio = progress ? progressRatio(progress.time, progress.duration) : 0;
   const hasProgress = playable && ratio > 0 && ratio < 1;
 
+  // Video waterfall reached 100% and audio renditions are being extracted.
+  const isExtractingAudio =
+    movie.transcodingProfile === EXTRACTING_AUDIO_PROFILE ||
+    ((movie.status === 'processing' || movie.status === 'partial') && movie.transcodingProgress === 100);
+
   const statusLabel = (() => {
     switch (movie.status) {
       case 'ready':
         return { text: 'Ready', className: 'tag-ready' };
       case 'partial':
+        if (isExtractingAudio) return { text: 'Extracting audio tracks', className: 'tag-processing' };
         return { text: `Transcoding ${movie.transcodingProgress ?? 0}%`, className: 'tag-processing' };
       case 'processing':
+        if (isExtractingAudio) return { text: 'Extracting audio tracks', className: 'tag-processing' };
         return { text: movie.transcodingProgress ? `${movie.transcodingProgress}%` : 'Processing', className: 'tag-processing' };
       case 'queued':
         return { text: queuePosition ? `Queue #${queuePosition}` : 'Queued', className: 'tag-queued' };

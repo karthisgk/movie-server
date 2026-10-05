@@ -29,6 +29,18 @@ data class Movie(
     val isPlayable: Boolean
         get() = status == "ready" || status == "partial"
 
+    /**
+     * True while audio renditions are extracted after the video waterfall.
+     * Mirrors the server sentinel stored in `transcodingProfile`.
+     */
+    val isExtractingAudio: Boolean
+        get() = transcodingProfile == EXTRACTING_AUDIO_PROFILE ||
+            ((status == "processing" || status == "partial") && (transcodingProgress ?: 0.0) == 100.0)
+
+    companion object {
+        const val EXTRACTING_AUDIO_PROFILE = "extracting audio tracks"
+    }
+
     /** Resolution badge string, e.g. "1080p" */
     val resolutionBadge: String?
         get() = when {

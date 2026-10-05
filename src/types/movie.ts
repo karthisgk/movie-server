@@ -113,6 +113,13 @@ export interface FfprobeOutput {
 export interface AudioTrackInfo {
   /** Stream index within the container (e.g. 0:1, 0:2) */
   streamIndex: number;
+  /**
+   * Position of this stream among the source's audio streams, used to build the
+   * FFmpeg `-map 0:a:<sourceAudioIndex>` selector. This is preserved separately
+   * from the array position because tracks are reordered (Tamil moved first) for
+   * presentation, and extraction must still read the original stream.
+   */
+  sourceAudioIndex: number;
   /** ISO 639 language code, e.g. 'eng', 'hin', 'tam' */
   language: string;
   /** Human-readable label, e.g. 'English', 'Hindi 5.1' */
@@ -122,3 +129,10 @@ export interface AudioTrackInfo {
   /** Number of audio channels (e.g. 2, 6) */
   channels: number;
 }
+
+/**
+ * Sentinel used as `transcodingProfile` while audio renditions are being
+ * extracted after the video waterfall finishes. Clients render this as
+ * "extracting audio tracks" instead of a resolution percentage.
+ */
+export const EXTRACTING_AUDIO_PROFILE = 'extracting audio tracks';

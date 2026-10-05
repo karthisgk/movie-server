@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { AlertTriangle, CheckCircle2, Clock, Cpu, HardDrive, Film, Play, RotateCcw, X } from 'lucide-react';
-import { PublicMovie, WatchProgress } from '../types';
+import { EXTRACTING_AUDIO_PROFILE, PublicMovie, WatchProgress } from '../types';
 import {
   cleanTitle,
   extractYear,
@@ -51,6 +51,11 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
   const ratio = progress ? progressRatio(progress.time, progress.duration) : 0;
   const hasProgress = playable && ratio > 0 && ratio < 1;
 
+  // Video waterfall done; audio renditions are being extracted before 'ready'.
+  const isExtractingAudio =
+    movie.transcodingProfile === EXTRACTING_AUDIO_PROFILE ||
+    ((movie.status === 'processing' || movie.status === 'partial') && movie.transcodingProgress === 100);
+
   return (
     <div className="detail-backdrop" onClick={onClose}>
       <div className="detail-modal" onClick={(e) => e.stopPropagation()}>
@@ -92,7 +97,11 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
 
         <div className="detail-body">
           <div className="detail-status">
-            {movie.status === 'failed' ? (
+            {isExtractingAudio ? (
+              <span className="detail-status-line detail-status-processing">
+                <Cpu size={16} className="spin" /> Extracting audio tracks...
+              </span>
+            ) : movie.status === 'failed' ? (
               <span className="detail-status-line detail-status-error">
                 <AlertTriangle size={16} /> {STATUS_LABEL[movie.status]}
               </span>

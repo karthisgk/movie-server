@@ -9,6 +9,7 @@ import { listExtractedSubtitles } from '../services/subtitleService.js';
 import { getMediaInfo } from '../services/ffmpegService.js';
 import { readHlsMetadata } from '../services/hlsService.js';
 import { ensureAudioTrackExtracted, generateMasterPlaylistContent } from '../services/audioExtractionService.js';
+import { resolveSourceAudioIndex } from '../services/audioTrackPrioritizer.js';
 
 /** Public-facing movie representation — no internal filesystem paths */
 function toPublicMovie(movie: Movie) {
@@ -263,6 +264,7 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
     const fallbackTrack = [
       {
         streamIndex: 0,
+        sourceAudioIndex: 0,
         language: 'und',
         label: movie.audioCodec ? `Default (${movie.audioCodec.toUpperCase()})` : 'Default Audio',
         codec: movie.audioCodec || 'aac',
@@ -293,9 +295,16 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
         const sourcePath = movie.sourcePath;
         if (sourcePath && ffmpegPath) {
           await Promise.all(
-            movie.audioTracks.map((_track, index) =>
-              ensureAudioTrackExtracted(id, sourcePath, index, hlsDirectory, ffmpegPath).catch((err: unknown) => {
-                logger.warn(`On-demand audio extraction failed for ${id} track ${index}: ${err}`);
+            movie.audioTracks.map((track, index) =>
+              ensureAudioTrackExtracted(
+                id,
+                sourcePath,
+                index,
+                resolveSourceAudioIndex(track, index),
+                hlsDirectory,
+                ffmpegPath,
+              ).catch((err: unknown) => {
+                logger.warn(`On-demand audio extraction failed for ${id} audio_${index}: ${err}`);
               }),
             ),
           );
@@ -318,10 +327,18 @@ export function createVideoRouter(registry: MovieRegistry, hlsDirectory: string,
       const sourcePath = movie?.sourcePath;
       if (match && sourcePath && ffmpegPath) {
         const trackIndex = parseInt(match[1], 10);
+        const track = movie?.audioTracks?.[trackIndex];
         try {
-          await ensureAudioTrackExtracted(id, sourcePath, trackIndex, hlsDirectory, ffmpegPath);
+          await ensureAudioTrackExtracted(
+            id,
+            sourcePath,
+            trackIndex,
+            resolveSourceAudioIndex(track, trackIndex),
+            hlsDirectory,
+            ffmpegPath,
+          );
         } catch (err) {
-          logger.error(`Error during on-demand audio extraction for ${id} track ${trackIndex}:`, err);
+          logger.error(`Error during on-demand audio extraction for ${id} audio_${trackIndex}:`, err);
         }
       }
     }

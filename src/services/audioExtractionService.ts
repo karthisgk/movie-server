@@ -3,7 +3,8 @@ import path from 'path';
 import fs from 'fs/promises';
 import { fileExists } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
-import { Movie } from '../types/movie.js';
+import { AudioTrackInfo, Movie } from '../types/movie.js';
+import { resolveSourceAudioIndex } from './audioTrackPrioritizer.js';
 
 const activeAudioJobs = new Map<string, Promise<void>>();
 
@@ -41,8 +42,11 @@ export async function existingAudioTrackIndices(
 
 /**
  * Ensures the HLS audio rendition for a track is fully extracted to
- * `hlsDirectory/<movieId>/audio_<trackIndex>/`.
+ * `hlsDirectory/<movieId>/audio_<targetTrackIndex>/`.
  *
+ * - `targetTrackIndex` is the presentation slot (audio_0 = Tamil, etc.).
+ * - `sourceAudioIndex` is the stream selector in the source container, so a
+ *   track reordered to slot 0 still extracts the correct `0:a:<n>` stream.
  * - Fragmented MP4 (CMAF) so it shares the container model with the video
  *   variants and hls.js remuxes it natively (keeps seeking aligned).
  * - Resolves only when extraction FINISHES (or fails); a playlist without
@@ -52,19 +56,20 @@ export async function existingAudioTrackIndices(
 export async function ensureAudioTrackExtracted(
   movieId: string,
   sourcePath: string,
-  trackIndex: number,
+  targetTrackIndex: number,
+  sourceAudioIndex: number,
   hlsDirectory: string,
   ffmpegPath: string,
   segmentDuration = 6,
 ): Promise<void> {
-  const jobKey = `${movieId}-${trackIndex}`;
+  const jobKey = `${movieId}-${targetTrackIndex}`;
 
   const inFlight = activeAudioJobs.get(jobKey);
   if (inFlight) {
     return inFlight;
   }
 
-  const audioDir = path.join(hlsDirectory, movieId, `audio_${trackIndex}`);
+  const audioDir = path.join(hlsDirectory, movieId, `audio_${targetTrackIndex}`);
   const playlistFile = path.join(audioDir, 'playlist.m3u8');
 
   const jobPromise = (async () => {
@@ -77,23 +82,25 @@ export async function ensureAudioTrackExtracted(
     try {
       await fs.access(sourcePath);
     } catch {
-      logger.warn(`Audio rendition for "${movieId}" track ${trackIndex} is incomplete but the source is unavailable — leaving as-is`);
+      logger.warn(`Audio rendition for "${movieId}" track ${targetTrackIndex} is incomplete but the source is unavailable — leaving as-is`);
       return;
     }
 
     try {
       // Remove any partial/stale output so the re-extraction starts clean.
       if (await fileExists(playlistFile)) {
-        logger.warn(`Audio rendition for "${movieId}" track ${trackIndex} is incomplete — re-extracting`);
+        logger.warn(`Audio rendition for "${movieId}" track ${targetTrackIndex} is incomplete — re-extracting`);
         await fs.rm(audioDir, { recursive: true, force: true });
       }
       await fs.mkdir(audioDir, { recursive: true });
-      logger.info(`Starting HLS audio extraction for "${movieId}" (audio track index: ${trackIndex})`);
+      logger.info(
+        `Starting HLS audio extraction for "${movieId}" (audio_${targetTrackIndex} ← source 0:a:${sourceAudioIndex})`,
+      );
 
       const args = [
         '-y',
         '-i', sourcePath,
-        '-map', `0:a:${trackIndex}`,
+        '-map', `0:a:${sourceAudioIndex}`,
         '-vn',
         '-c:a', 'aac',
         '-b:a', '128k',
@@ -125,10 +132,10 @@ export async function ensureAudioTrackExtracted(
 
         proc.on('close', (code) => {
           if (code === 0) {
-            logger.info(`Completed HLS audio extraction for "${movieId}" (track ${trackIndex})`);
+            logger.info(`Completed HLS audio extraction for "${movieId}" (audio_${targetTrackIndex})`);
           } else {
             logger.error(
-              `FFmpeg audio extraction failed for "${movieId}" track ${trackIndex} (exit code ${code}):\n${stderrOutput.slice(-500)}`,
+              `FFmpeg audio extraction failed for "${movieId}" audio_${targetTrackIndex} (exit code ${code}):\n${stderrOutput.slice(-500)}`,
             );
           }
           resolve();
@@ -149,7 +156,7 @@ export async function ensureAudioTrackExtracted(
  * movie has its audio tracks rebuilt to completion before it is served again.
  */
 export async function repairIncompleteAudioRenditions(
-  movies: { id: string; sourcePath?: string; audioTracks?: unknown[] }[],
+  movies: { id: string; sourcePath?: string; audioTracks?: AudioTrackInfo[] }[],
   hlsDirectory: string,
   ffmpegPath: string,
   segmentDuration = 6,
@@ -165,16 +172,23 @@ export async function repairIncompleteAudioRenditions(
     while (cursor < candidates.length) {
       const movie = candidates[cursor++];
       if (!movie.sourcePath) continue;
+      const tracks = movie.audioTracks as AudioTrackInfo[];
       try {
         // Reuse the same dedupe/self-heal path; sequential per movie is handled
         // inside by running all tracks in parallel.
         await Promise.all(
-          (movie.audioTracks as unknown[]).map((_t, index) =>
-            ensureAudioTrackExtracted(movie.id, movie.sourcePath as string, index, hlsDirectory, ffmpegPath, segmentDuration).catch(
-              (err: unknown) => {
-                logger.warn(`Audio repair failed for ${movie.id} track ${index}: ${err}`);
-              },
-            ),
+          tracks.map((track, index) =>
+            ensureAudioTrackExtracted(
+              movie.id,
+              movie.sourcePath as string,
+              index,
+              resolveSourceAudioIndex(track, index),
+              hlsDirectory,
+              ffmpegPath,
+              segmentDuration,
+            ).catch((err: unknown) => {
+              logger.warn(`Audio repair failed for ${movie.id} audio_${index}: ${err}`);
+            }),
           ),
         );
       } catch (err) {

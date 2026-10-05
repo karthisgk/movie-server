@@ -2,11 +2,12 @@ import { spawn } from 'child_process';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { AudioTrackInfo, FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
+import { AudioTrackInfo, EXTRACTING_AUDIO_PROFILE, FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
 import { ensureDir, fileExists, writeJsonFile } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { HlsMetadata } from '../types/movie.js';
 import { ensureAudioTrackExtracted, isPlaylistComplete } from './audioExtractionService.js';
+import { prioritizeAudioTracks, resolveSourceAudioIndex } from './audioTrackPrioritizer.js';
 
 export interface MediaInfo {
   durationSeconds: number;
@@ -121,8 +122,10 @@ export async function getMediaInfo(filePath: string, ffprobePath: string): Promi
   const durationStr = output.format.duration;
   const durationSeconds = durationStr ? parseFloat(durationStr) : 0;
 
-  // Build audio track info for every audio stream
-  const audioTracks: AudioTrackInfo[] = audioStreams.map((s, idx) => {
+  // Build audio track info for every audio stream, then reorder so Tamil is
+  // presented first (index 0). `sourceAudioIndex` preserves the true stream
+  // position for extraction regardless of the presentation order.
+  const detectedTracks: AudioTrackInfo[] = audioStreams.map((s, idx) => {
     const lang = s.tags?.language ?? 'und';
     const title = s.tags?.title;
     const channels = s.channels ?? 2;
@@ -138,12 +141,15 @@ export async function getMediaInfo(filePath: string, ffprobePath: string): Promi
     }
     return {
       streamIndex: s.index ?? idx,
+      sourceAudioIndex: idx,
       language: lang,
       label,
       codec: s.codec_name,
       channels,
     };
   });
+
+  const audioTracks = prioritizeAudioTracks(detectedTracks);
 
   return {
     durationSeconds,
@@ -354,35 +360,67 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
   // Initial progress update
   updateOverallProgress();
 
-  // ── Multi-audio: materialise every audio rendition up-front ─────────────────
-  // Multi-audio video variants are video-only, so each audio track MUST exist as
-  // its own rendition before any master.m3u8 references it. Doing this once here
-  // (including for already-completed movies) prevents the master from pointing at
-  // an audio playlist that does not exist — which makes hls.js buffer forever.
-  if (sourceInfo.audioTracks.length > 1) {
+  const multiAudio = sourceInfo.audioTracks.length > 1;
+
+  // Every audio rendition already complete? (avoids flashing the phase on resume)
+  const audioRenditionsComplete = async (): Promise<boolean> => {
+    if (!multiAudio) return true;
+    for (let i = 0; i < sourceInfo.audioTracks.length; i++) {
+      if (!(await isPlaylistComplete(path.join(finalDir, `audio_${i}`, 'playlist.m3u8')))) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // ── Multi-audio: extract renditions AFTER video, never before ───────────────
+  // Video encoding no longer blocks on audio. Multi-audio video variants are
+  // video-only, so partial playback is served by the /hls master route's
+  // on-demand extraction; once the video waterfall finishes here we extract all
+  // renditions and rewrite master.m3u8 with the audio group.
+  const extractAudioRenditions = async (): Promise<void> => {
+    if (!multiAudio) return;
+    if (await audioRenditionsComplete()) return;
+
     let sourceExists = true;
     try {
       await fs.access(inputPath);
     } catch {
       sourceExists = false;
     }
-
-    if (sourceExists) {
-      await Promise.all(
-        sourceInfo.audioTracks.map((_track, index) =>
-          ensureAudioTrackExtracted(movieId, inputPath, index, hlsDirectory, ffmpegPath, segmentDuration).catch(
-            (err: unknown) => {
-              logger.warn(
-                `Audio track ${index} extraction failed for ${movieId}: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            },
-          ),
-        ),
-      );
+    if (!sourceExists) {
+      logger.warn(`Audio renditions for ${movieId} are incomplete but the source is unavailable — skipping extraction`);
+      return;
     }
-  }
+
+    if (onProgress) {
+      onProgress(100, EXTRACTING_AUDIO_PROFILE);
+    }
+    logger.info(
+      `Video transcoding complete for ${movieId} — extracting ${sourceInfo.audioTracks.length} audio rendition(s)`,
+    );
+
+    await Promise.all(
+      sourceInfo.audioTracks.map((track, index) =>
+        ensureAudioTrackExtracted(
+          movieId,
+          inputPath,
+          index,
+          resolveSourceAudioIndex(track, index),
+          hlsDirectory,
+          ffmpegPath,
+          segmentDuration,
+        ).catch((err: unknown) => {
+          logger.warn(
+            `Audio rendition ${index} (${track.label}) extraction failed for ${movieId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }),
+      ),
+    );
+  };
 
   if (toTranscode.length === 0) {
+    await extractAudioRenditions();
     await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
     if (onProgress) {
       onProgress(100, sortedProfiles[0].name);
@@ -709,6 +747,12 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
           onProfileComplete(profile, [...completedProfiles]);
         }
       }
+    }
+
+    // Video waterfall done. Deferred audio extraction + final master rewrite.
+    await extractAudioRenditions();
+    if (multiAudio) {
+      await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
     }
 
     if (onProgress) {

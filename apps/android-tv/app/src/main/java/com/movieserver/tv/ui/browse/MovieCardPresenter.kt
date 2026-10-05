@@ -54,14 +54,24 @@ class MovieCardPresenter : Presenter() {
                 holder.status.setTextColor(0xFF4CAF50.toInt())
             }
             "partial"    -> {
-                holder.status.text = "▶ Partial"
-                holder.status.setTextColor(0xFFFF9800.toInt())
+                if (movie.isExtractingAudio) {
+                    holder.status.text = "🎵 Extracting audio tracks"
+                    holder.status.setTextColor(0xFF00E5FF.toInt())
+                } else {
+                    holder.status.text = "▶ Partial"
+                    holder.status.setTextColor(0xFFFF9800.toInt())
+                }
             }
             "processing" -> {
-                val progress = movie.transcodingProgress?.toInt() ?: 0
-                val profile = movie.transcodingProfile ?: ""
-                holder.status.text = "⚙ $profile $progress%"
-                holder.status.setTextColor(0xFF2196F3.toInt())
+                if (movie.isExtractingAudio) {
+                    holder.status.text = "🎵 Extracting audio tracks"
+                    holder.status.setTextColor(0xFF00E5FF.toInt())
+                } else {
+                    val progress = movie.transcodingProgress?.toInt() ?: 0
+                    val profile = movie.transcodingProfile ?: ""
+                    holder.status.text = "⚙ $profile $progress%"
+                    holder.status.setTextColor(0xFF2196F3.toInt())
+                }
             }
             "queued"     -> {
                 holder.status.text = "⏳ Queued"
