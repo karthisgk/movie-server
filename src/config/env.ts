@@ -39,6 +39,12 @@ export interface AppConfig {
   hlsSegmentDuration: number;
   maxConcurrentTranscodes: number;
   autoTranscode: boolean;
+  /** Use the chunk-based waterfall pipeline (vs. the legacy whole-file per-profile workers). */
+  transcodeChunked: boolean;
+  /** Length of each transcode chunk in seconds (must be a multiple of the HLS segment duration). */
+  transcodeChunkDuration: number;
+  /** Number of concurrent chunk workers. 0 = auto (min(floor(cores/2), 6)). */
+  transcodeChunkWorkers: number;
 }
 
 function loadConfig(): AppConfig {
@@ -60,6 +66,9 @@ function loadConfig(): AppConfig {
     hlsSegmentDuration: getEnvInt('HLS_SEGMENT_DURATION', 6),
     maxConcurrentTranscodes: getEnvInt('MAX_CONCURRENT_TRANSCODES', 1),
     autoTranscode: getEnvBool('AUTO_TRANSCODE', true),
+    transcodeChunked: getEnvBool('TRANSCODE_CHUNKED', true),
+    transcodeChunkDuration: getEnvInt('TRANSCODE_CHUNK_DURATION', 120),
+    transcodeChunkWorkers: getEnvInt('TRANSCODE_CHUNK_WORKERS', 0),
   };
 }
 

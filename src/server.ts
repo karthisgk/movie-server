@@ -231,6 +231,9 @@ async function bootstrap(): Promise<void> {
             sourceModifiedTime: stats.mtimeMs,
             title: mov.title,
             filename: mov.filename,
+            chunked: config.transcodeChunked,
+            chunkDurationSeconds: config.transcodeChunkDuration,
+            chunkWorkers: config.transcodeChunkWorkers,
             onProgress: (percent, profileName) => {
               registry.update(movieId, {
                 transcodingProgress: percent,

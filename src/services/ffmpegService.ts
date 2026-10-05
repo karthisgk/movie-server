@@ -1,8 +1,9 @@
 import { spawn } from 'child_process';
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import { AudioTrackInfo, FfprobeOutput, QUALITY_PROFILES, QualityProfile } from '../types/movie.js';
-import { ensureDir, writeJsonFile } from '../utils/filesystem.js';
+import { ensureDir, fileExists, writeJsonFile } from '../utils/filesystem.js';
 import { logger } from '../utils/logger.js';
 import { HlsMetadata } from '../types/movie.js';
 import { ensureAudioTrackExtracted, isPlaylistComplete } from './audioExtractionService.js';
@@ -52,6 +53,15 @@ export interface TranscodeOptions {
   /** Movie title and filename, stored in metadata.json for source-less registry recovery */
   title?: string;
   filename?: string;
+  /**
+   * Use the chunk-based waterfall pipeline (sequential resolutions, parallel
+   * chunks). Defaults to true; set false to use the legacy whole-file workers.
+   */
+  chunked?: boolean;
+  /** Length of each transcode chunk in seconds (aligned to whole segments). Default 120. */
+  chunkDurationSeconds?: number;
+  /** Concurrent chunk workers. 0/undefined = auto (min(floor(cores / 2), 6)). */
+  chunkWorkers?: number;
 }
 
 /**
@@ -252,6 +262,9 @@ export async function detectCompletedProfiles(
 
 import { Worker } from 'worker_threads';
 import { TranscodeWorkerData, WorkerToMainMessage, MainToWorkerMessage } from './transcodeWorker.js';
+import { ChunkWorkerData, ChunkWorkerToMain } from './transcodeChunkWorker.js';
+import { planTranscodeChunks, aggregateChunkProgress, TranscodeChunk } from './transcodeChunkPlanner.js';
+import { stitchChunks, cleanProfileHlsOutput } from './chunkStitcher.js';
 
 /**
  * Transcodes a movie to HLS using FFmpeg concurrently in Worker Threads per resolution.
@@ -280,6 +293,9 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     onProfileComplete,
     alreadyCompleted = [],
     sourceInfo,
+    chunked = true,
+    chunkDurationSeconds = 120,
+    chunkWorkers = 0,
   } = opts;
 
   const finalDir = path.join(hlsDirectory, movieId);
@@ -323,17 +339,16 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     profileProgressMap[p.name] = alreadyDoneNames.has(p.name) ? 100 : 0;
   }
 
+  // In the waterfall exactly one resolution is active at a time; report that one
+  // (rather than every not-yet-finished profile) so `transcodingProfile` is truthful.
+  let activeProfileName = toTranscode[0]?.name ?? sortedProfiles[0].name;
+
   const updateOverallProgress = () => {
     if (!onProgress) return;
     const sumProgress = sortedProfiles.reduce((acc, p) => acc + (profileProgressMap[p.name] ?? 0), 0);
     const overallPercent = Math.min(100, Math.round(sumProgress / totalProfilesCount));
 
-    const activeProfiles = toTranscode
-      .filter((p) => (profileProgressMap[p.name] ?? 0) < 100)
-      .map((p) => p.name);
-    const currentProfileName = activeProfiles.join('+') || sortedProfiles[0].name;
-
-    onProgress(overallPercent, currentProfileName);
+    onProgress(overallPercent, activeProfileName);
   };
 
   // Initial progress update
@@ -375,10 +390,11 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     return;
   }
 
-  // Determine worker thread module path
+  // Determine worker thread module paths
   const isTs = path.extname(import.meta.url) === '.ts';
   const workerExt = isTs ? '.ts' : '.js';
   const workerUrl = new URL(`./transcodeWorker${workerExt}`, import.meta.url);
+  const chunkWorkerUrl = new URL(`./transcodeChunkWorker${workerExt}`, import.meta.url);
 
   const activeWorkers: Worker[] = [];
 
@@ -398,40 +414,172 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
     signal.addEventListener('abort', handleAbort, { once: true });
   }
 
-  try {
-    const workerPromises = toTranscode.map(async (profile) => {
-      const profileDir = path.join(finalDir, profile.name);
-      await ensureDir(profileDir);
+  // ── Chunk pool sizing ────────────────────────────────────────────────────────
+  const cpuCount = Math.max(1, os.cpus()?.length ?? 4);
+  const requestedWorkers =
+    chunkWorkers > 0 ? chunkWorkers : Math.max(1, Math.min(Math.floor(cpuCount / 2), 6));
+  const workerCount = Math.max(1, Math.min(requestedWorkers, cpuCount));
+  const threadsPerWorker = Math.max(1, Math.floor(cpuCount / workerCount));
+  const videoOnly = sourceInfo.audioTracks.length > 1;
 
-      const workerData: TranscodeWorkerData = {
-        inputPath,
-        outputDir: profileDir,
-        profile,
-        segmentDuration,
-        ffmpegPath,
-        durationSeconds: sourceInfo.durationSeconds,
-        audioTracks: sourceInfo.audioTracks,
-      };
+  // Legacy whole-file worker: one FFmpeg process transcodes the entire movie.
+  const runMonolithicProfile = (profile: QualityProfile): Promise<void> => {
+    const profileDir = path.join(finalDir, profile.name);
+    return ensureDir(profileDir).then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new Error('Transcoding cancelled before start'));
+            return;
+          }
 
-      return new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) {
-          reject(new Error('Transcoding cancelled before start'));
-          return;
-        }
+          const workerData: TranscodeWorkerData = {
+            inputPath,
+            outputDir: profileDir,
+            profile,
+            segmentDuration,
+            ffmpegPath,
+            durationSeconds: sourceInfo.durationSeconds,
+            audioTracks: sourceInfo.audioTracks,
+          };
 
-        const worker = new Worker(workerUrl, {
+          const worker = new Worker(workerUrl, {
+            workerData,
+            execArgv: process.execArgv,
+          });
+          activeWorkers.push(worker);
+
+          let isDone = false;
+          const cleanup = () => {
+            const index = activeWorkers.indexOf(worker);
+            if (index !== -1) activeWorkers.splice(index, 1);
+            try {
+              worker.terminate().catch(() => {});
+            } catch {
+              // ignore if already terminated
+            }
+          };
+
+          worker.on('message', (msg: WorkerToMainMessage) => {
+            if (msg.type === 'progress') {
+              profileProgressMap[profile.name] = msg.percent;
+              updateOverallProgress();
+            } else if (msg.type === 'complete') {
+              profileProgressMap[profile.name] = 100;
+              updateOverallProgress();
+              if (!isDone) {
+                isDone = true;
+                cleanup();
+                resolve();
+              }
+            } else if (msg.type === 'error') {
+              if (!isDone) {
+                isDone = true;
+                cleanup();
+                reject(new Error(msg.error));
+              }
+            }
+          });
+
+          worker.on('error', (err) => {
+            if (!isDone) {
+              isDone = true;
+              cleanup();
+              reject(new Error(`Worker thread error for ${profile.name}: ${err.message}`));
+            }
+          });
+
+          worker.on('exit', (code) => {
+            if (!isDone) {
+              isDone = true;
+              cleanup();
+              if (code === 0) {
+                resolve();
+              } else if (!signal?.aborted) {
+                reject(new Error(`Worker thread for ${profile.name} exited with code ${code}`));
+              } else {
+                reject(new Error('Transcoding was cancelled'));
+              }
+            }
+          });
+        }),
+    );
+  };
+
+  // Chunked worker pool: the profile is split into segment-aligned slices that
+  // are encoded concurrently, then stitched with a single stream-copy concat.
+  const runChunkedProfile = async (profile: QualityProfile): Promise<void> => {
+    const profileDir = path.join(finalDir, profile.name);
+    const chunkDir = path.join(profileDir, 'chunks');
+    await ensureDir(chunkDir);
+
+    const chunks = planTranscodeChunks({
+      durationSeconds: sourceInfo.durationSeconds,
+      chunkDurationSeconds,
+      segmentDurationSeconds: segmentDuration,
+    });
+
+    if (chunks.length === 0) {
+      // Unknown duration — cannot plan slices; use the whole-file worker instead.
+      await runMonolithicProfile(profile);
+      return;
+    }
+
+    // Clear stale HLS artifacts from a previous interrupted run (keeps chunks/).
+    await cleanProfileHlsOutput(profileDir);
+
+    const chunkFileName = (index: number) => `chunk_${String(index).padStart(4, '0')}.ts`;
+    const doneMarker = (index: number) => `chunk_${String(index).padStart(4, '0')}.done`;
+
+    const progressByIndex = new Map<number, number>();
+    const pending: TranscodeChunk[] = [];
+
+    for (const chunk of chunks) {
+      const outPath = path.join(chunkDir, chunkFileName(chunk.index));
+      const markerPath = path.join(chunkDir, doneMarker(chunk.index));
+      if ((await fileExists(markerPath)) && (await fileExists(outPath))) {
+        progressByIndex.set(chunk.index, 100);
+      } else {
+        await fs.rm(outPath, { force: true }).catch(() => {});
+        await fs.rm(markerPath, { force: true }).catch(() => {});
+        pending.push(chunk);
+      }
+    }
+
+    const reportProfileProgress = () => {
+      const percent = aggregateChunkProgress(chunks, progressByIndex);
+      profileProgressMap[profile.name] = percent;
+      updateOverallProgress();
+    };
+
+    reportProfileProgress();
+
+    let poolAborted = false;
+    let cursor = 0;
+
+    const runSingleChunk = (chunk: TranscodeChunk): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const workerData: ChunkWorkerData = {
+          inputPath,
+          profile,
+          segmentDuration,
+          ffmpegPath,
+          chunk: { index: chunk.index, startSec: chunk.startSec, durationSec: chunk.durationSec },
+          outputPath: path.join(chunkDir, chunkFileName(chunk.index)),
+          videoOnly,
+          threads: threadsPerWorker,
+        };
+
+        const worker = new Worker(chunkWorkerUrl, {
           workerData,
           execArgv: process.execArgv,
         });
         activeWorkers.push(worker);
 
         let isDone = false;
-
         const cleanup = () => {
           const index = activeWorkers.indexOf(worker);
-          if (index !== -1) {
-            activeWorkers.splice(index, 1);
-          }
+          if (index !== -1) activeWorkers.splice(index, 1);
           try {
             worker.terminate().catch(() => {});
           } catch {
@@ -439,32 +587,29 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
           }
         };
 
-        worker.on('message', async (msg: WorkerToMainMessage) => {
+        worker.on('message', (msg: ChunkWorkerToMain) => {
           if (msg.type === 'progress') {
-            profileProgressMap[profile.name] = msg.percent;
-            updateOverallProgress();
+            progressByIndex.set(chunk.index, msg.percent);
+            reportProfileProgress();
           } else if (msg.type === 'complete') {
-            profileProgressMap[profile.name] = 100;
-            updateOverallProgress();
-
-            logger.info(`Worker thread completed ${profile.name} for ${movieId}`);
-
-            if (!completedProfiles.some((p) => p.name === profile.name)) {
-              completedProfiles.push(profile);
-              completedProfiles.sort((a, b) => b.height - a.height);
-              await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
-              logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
-
-              if (onProfileComplete) {
-                onProfileComplete(profile, [...completedProfiles]);
-              }
-            }
-
-            if (!isDone) {
-              isDone = true;
-              cleanup();
-              resolve();
-            }
+            progressByIndex.set(chunk.index, 100);
+            reportProfileProgress();
+            const markerPath = path.join(chunkDir, doneMarker(chunk.index));
+            fs.writeFile(markerPath, new Date().toISOString(), 'utf-8')
+              .then(() => {
+                if (!isDone) {
+                  isDone = true;
+                  cleanup();
+                  resolve();
+                }
+              })
+              .catch((err: unknown) => {
+                if (!isDone) {
+                  isDone = true;
+                  cleanup();
+                  reject(err instanceof Error ? err : new Error(String(err)));
+                }
+              });
           } else if (msg.type === 'error') {
             if (!isDone) {
               isDone = true;
@@ -478,7 +623,7 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
           if (!isDone) {
             isDone = true;
             cleanup();
-            reject(new Error(`Worker thread error for ${profile.name}: ${err.message}`));
+            reject(new Error(`Chunk worker error for ${profile.name} #${chunk.index}: ${err.message}`));
           }
         });
 
@@ -489,16 +634,82 @@ export async function transcodeToHls(opts: TranscodeOptions): Promise<void> {
             if (code === 0) {
               resolve();
             } else if (!signal?.aborted) {
-              reject(new Error(`Worker thread for ${profile.name} exited with code ${code}`));
+              reject(new Error(`Chunk worker for ${profile.name} #${chunk.index} exited with code ${code}`));
             } else {
               reject(new Error('Transcoding was cancelled'));
             }
           }
         });
       });
-    });
 
-    await Promise.all(workerPromises);
+    const runChunkLoop = async (): Promise<void> => {
+      while (true) {
+        const position = cursor++;
+        if (position >= pending.length) return;
+        if (poolAborted || signal?.aborted) return;
+        try {
+          await runSingleChunk(pending[position]);
+        } catch (err) {
+          poolAborted = true;
+          throw err;
+        }
+      }
+    };
+
+    const poolSize = Math.max(1, Math.min(workerCount, pending.length));
+    logger.info(
+      `Chunked ${profile.name} for ${movieId}: ${chunks.length} chunk(s), ${pending.length} pending, ` +
+        `${poolSize} worker(s), ${threadsPerWorker} thread(s) each`,
+    );
+
+    await Promise.all(Array.from({ length: poolSize }, () => runChunkLoop()));
+
+    const chunkFiles = chunks.map((chunk) => chunkFileName(chunk.index));
+    await stitchChunks({
+      profileDir,
+      chunkDir,
+      chunkFiles,
+      segmentDuration,
+      ffmpegPath,
+      videoOnly,
+      signal,
+    });
+  };
+
+  try {
+    // Waterfall: one resolution at a time, highest quality first. Each profile
+    // becomes playable (master.m3u8 updated) the moment its chunks are stitched.
+    for (const profile of toTranscode) {
+      if (signal?.aborted) {
+        throw new Error('Transcoding cancelled');
+      }
+
+      activeProfileName = profile.name;
+      const useChunking = chunked && sourceInfo.durationSeconds > 0;
+      logger.info(
+        `Transcoding ${profile.name} for ${movieId} ` +
+          `(${useChunking ? `chunked, ${chunkDurationSeconds}s chunks` : 'whole-file'})`,
+      );
+
+      if (useChunking) {
+        await runChunkedProfile(profile);
+      } else {
+        await runMonolithicProfile(profile);
+      }
+
+      profileProgressMap[profile.name] = 100;
+      updateOverallProgress();
+
+      if (!completedProfiles.some((p) => p.name === profile.name)) {
+        completedProfiles.push(profile);
+        completedProfiles.sort((a, b) => b.height - a.height);
+        await writeMasterPlaylist(finalDir, completedProfiles, sourceInfo.audioTracks);
+        logger.info(`master.m3u8 updated for ${movieId} — available: ${completedProfiles.map((p) => p.name).join(', ')}`);
+        if (onProfileComplete) {
+          onProfileComplete(profile, [...completedProfiles]);
+        }
+      }
+    }
 
     if (onProgress) {
       onProgress(100, sortedProfiles[0].name);

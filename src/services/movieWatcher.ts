@@ -389,6 +389,9 @@ export class MovieWatcher {
           sourceModifiedTime: stats.mtimeMs,
           title: movie.title,
           filename: movie.filename,
+          chunked: this.config.transcodeChunked,
+          chunkDurationSeconds: this.config.transcodeChunkDuration,
+          chunkWorkers: this.config.transcodeChunkWorkers,
           onProgress: (percent, profileName) => {
             this.registry.update(movieId, {
               transcodingProgress: percent,
